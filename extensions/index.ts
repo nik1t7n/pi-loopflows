@@ -961,7 +961,51 @@ function parseObserverOutput(output: string) {
   };
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+async function commandOutput(command: string, cwd: string): Promise<string> {
+  return await new Promise((resolve) => {
+    const proc = spawn("/bin/bash", ["-lc", command], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    proc.stdout.on("data", (d) => { stdout += d.toString(); });
+    proc.stderr.on("data", (d) => { stderr += d.toString(); });
+    proc.on("close", (code) => resolve((stdout || stderr || `exit ${code ?? 0}`).trim()));
+    proc.on("error", (err) => resolve(String(err?.message ?? err)));
+  });
+}
+
+function inferTargetPath(task: string, cwd: string): string | undefined {
+  const cwdMatch = task.match(/\/Users\/[^\s,]+(?:\/[^\s,]+)*/);
+  const folderMatch = task.match(/создай\s+папку\s+([^,\n]+?)(?:\s+где|\s+в\s+которой|$)/i);
+  if (cwdMatch && folderMatch) return path.join(cwdMatch[0], folderMatch[1].trim());
+  return cwdMatch?.[0] ?? cwd;
+}
+
+async function buildDeterministicContext(def: StepDef, ctx: RunContext, iteration?: number): Promise<StepResult> {
+  const targetPath = inferTargetPath(ctx.task, ctx.cwd);
+  const targetExists = targetPath ? fs.existsSync(targetPath) : false;
+  const parentPath = targetPath ? path.dirname(targetPath) : ctx.cwd;
+  const pythonVersion = await commandOutput("python3 --version", ctx.cwd);
+  const uvVersion = await commandOutput("uv --version || true", ctx.cwd);
+  const parentListing = fs.existsSync(parentPath)
+    ? fs.readdirSync(parentPath).slice(0, 80).join("\n")
+    : "<parent path does not exist>";
+  const output = `# Launch-control execution context\n\n## Scope\n${ctx.task}\n\n## Target\n- cwd: ${ctx.cwd}\n- inferred target path: ${targetPath ?? "unknown"}\n- target exists: ${targetExists}\n- parent path: ${parentPath}\n\n## Environment\n- ${pythonVersion}\n- ${uvVersion}\n\n## Parent directory sample\n\`\`\`\n${parentListing}\n\`\`\`\n\n## Validation contract candidates\n- Python syntax check for app modules.\n- Backend tests with pytest.\n- FastAPI smoke test on an available localhost port.\n- Static frontend file presence check.\n\n## Constraints and stop conditions\n- Create/modify only the target project folder.\n- Do not scan unrelated projects, .pi, previous loopflow runs, node_modules, .venv, or caches.\n- Stop if required dependencies cannot be installed or local server cannot be validated after diagnostics.\n`;
+  const artifactName = def.output ? renderTemplate(def.output, ctx, iteration) : `${safeName(def.id)}.md`;
+  const artifactPath = await saveArtifact(ctx, artifactName, output);
+  const result: StepResult = { id: def.id, agent: def.agent, iteration, output, artifactPath, exitCode: 0 };
+  ctx.outputs[def.id] = result;
+  ctx.outputs[iteration ? `${def.id}_${iteration}` : def.id] = result;
+  ctx.sequence.push(result);
+  return result;
+}
+
 async function runStep(def: StepDef, ctx: RunContext, adapter: ExecutorAdapter, scope: "user" | "project" | "both", signal: AbortSignal | undefined, iteration?: number, onAgentEvent?: (event: any) => void): Promise<StepResult> {
+  if (def.agent === "builtin-context") return buildDeterministicContext(def, ctx, iteration);
+
   let task = renderTemplate(def.task, ctx, iteration);
   
   // Natively inject Observational Memory if active but not explicitly placed in template
