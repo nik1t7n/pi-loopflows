@@ -1,0 +1,48 @@
+{
+  "name": "plan-review",
+  "version": "1.0.0",
+  "description": "Planning loop: gather context, draft a plan, review the plan, and revise until approved or blocked before implementation.",
+  "backend": "pi-subprocess",
+  "defaults": {
+    "agentScope": "both"
+  },
+  "steps": [
+    {
+      "id": "context",
+      "agent": "context-builder",
+      "output": "context.md",
+      "task": "Build planning context for this task:\n\n{task}\n\nInspect the repository enough to identify relevant files, constraints, validation commands, risks, and unknowns. Do not edit files."
+    },
+    {
+      "loop": {
+        "id": "plan-review",
+        "maxIterations": 2,
+        "gateStep": "review",
+        "passStatuses": ["approved"],
+        "retryStatuses": ["changes_requested"],
+        "stopStatuses": ["blocked"],
+        "onExhausted": "stop",
+        "body": [
+          {
+            "id": "plan",
+            "agent": "planner",
+            "output": "plan-{loop.iteration}.md",
+            "task": "Draft or revise implementation plan iteration {loop.iteration}.\n\nTask:\n{task}\n\nContext:\n{outputs.context}\n\nPrevious review, if any:\n{outputs.review.output}\n\nReturn a practical implementation plan with scope, non-goals, acceptance criteria, likely files, validation commands, risks, and open questions. Do not edit files."
+          },
+          {
+            "id": "review",
+            "agent": "reviewer",
+            "output": "plan-review-{loop.iteration}.json",
+            "gate": {
+              "type": "json-status",
+              "passStatuses": ["approved"],
+              "retryStatuses": ["changes_requested"],
+              "stopStatuses": ["blocked"]
+            },
+            "task": "Review this implementation plan before any code is written. Do not edit files.\n\nTask:\n{task}\n\nContext:\n{outputs.context}\n\nPlan:\n{outputs.plan}\n\nReturn ONLY valid JSON:\n{\n  \"status\": \"approved\" | \"changes_requested\" | \"blocked\",\n  \"summary\": \"short verdict\",\n  \"findings\": [{\"severity\": \"blocker|required|optional\", \"issue\": \"specific issue\", \"required_fix\": \"specific plan change or null\"}],\n  \"missing_acceptance_criteria\": [\"criterion\"],\n  \"requires_user_decision\": false\n}\n\nApprove only if the plan is specific, scoped, testable, and safe to hand to a worker. Request changes for vague scope, missing validation, or unclear acceptance criteria. Block when user/product decisions or credentials are required."
+          }
+        ]
+      }
+    }
+  ]
+}

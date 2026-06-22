@@ -1,0 +1,48 @@
+{
+  "name": "build-review",
+  "version": "1.0.0",
+  "description": "Generic scoped implementation loop: plan, build, independent review, repeat fixes until approved or blocked.",
+  "backend": "pi-subprocess",
+  "defaults": {
+    "agentScope": "both"
+  },
+  "steps": [
+    {
+      "id": "plan",
+      "agent": "planner",
+      "output": "plan.md",
+      "task": "Create a concise implementation plan for this task:\n\n{task}\n\nInclude acceptance criteria, likely files, validation commands, non-goals, and stop conditions. Do not edit files."
+    },
+    {
+      "loop": {
+        "id": "build-review",
+        "maxIterations": 3,
+        "gateStep": "review",
+        "passStatuses": ["approved"],
+        "retryStatuses": ["changes_requested"],
+        "stopStatuses": ["blocked"],
+        "onExhausted": "stop",
+        "body": [
+          {
+            "id": "build",
+            "agent": "worker",
+            "output": "build-{loop.iteration}.md",
+            "task": "Implement or fix iteration {loop.iteration}.\n\nTask:\n{task}\n\nPlan:\n{outputs.plan}\n\nPrevious review, if any:\n{outputs.review.output}\n\nIf this is iteration 1, implement the planned change. If this is a later iteration, apply only required reviewer fixes. Use the real project stack. Do not add mocks, demos, fake validation, or hidden fallbacks unless explicitly requested. Run focused validation and report changed files, commands with exit codes, evidence, blockers, and remaining risks."
+          },
+          {
+            "id": "review",
+            "agent": "reviewer",
+            "output": "review-{loop.iteration}.json",
+            "gate": {
+              "type": "json-status",
+              "passStatuses": ["approved"],
+              "retryStatuses": ["changes_requested"],
+              "stopStatuses": ["blocked"]
+            },
+            "task": "Review iteration {loop.iteration}. Do not edit project/source files.\n\nTask:\n{task}\n\nPlan:\n{outputs.plan}\n\nBuilder report:\n{outputs.build.output}\n\nReturn ONLY valid JSON:\n{\n  \"status\": \"approved\" | \"changes_requested\" | \"blocked\",\n  \"summary\": \"short verdict\",\n  \"findings\": [{\"severity\": \"blocker|required|optional\", \"file\": \"path or null\", \"issue\": \"specific issue\", \"required_fix\": \"specific fix or null\"}],\n  \"validation_gaps\": [\"gap\"],\n  \"requires_user_decision\": false\n}\n\nApprove only if the implementation and evidence satisfy the plan. Request changes for required fixable issues. Block for missing credentials, missing decisions, unsafe scope, or stale plan."
+          }
+        ]
+      }
+    }
+  ]
+}

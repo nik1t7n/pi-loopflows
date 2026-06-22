@@ -1,12 +1,26 @@
 # pi-loopflows
 
-Deterministic loop workflows for Pi subagents.
+Build deterministic AI workflows out of Pi subagents.
 
-A **loopflow** describes agent work as a process instead of a single prompt: steps, gates, feedback loops, stop conditions, and saved evidence. It lets you connect Pi subagents like building blocks: gather context, plan, build, review, loop back for fixes, and audit the result.
+A **loopflow** is a reusable process for agent work: steps, gates, feedback loops, stop rules, and evidence artifacts. Instead of asking one agent to “do the whole thing”, you describe how specialist agents should cooperate: one agent gathers context, another plans, another builds, another reviews, and a gate decides whether the work moves forward, loops back for fixes, or stops.
 
-## Why
+`pi-loopflows` ships with a production-ready **Launch Control** loopflow out of the box, and it is also a flexible constructor for your own workflows.
 
-Normal chains are linear. Real work is not. A reviewer may request changes, a builder may need another pass, or a gate may block because evidence is missing. `pi-loopflows` adds that missing control flow while keeping the agents focused on their roles.
+## Why loopflows
+
+Linear chains are useful, but real work is not always linear. A reviewer can request changes. A validator can reject missing evidence. A planner can reveal that the task is blocked. A builder may need several focused passes before the result is safe to accept.
+
+Loopflows make that control flow explicit:
+
+```text
+step → step → gate
+             ↓
+          approved → continue
+          changes_requested → loop back
+          blocked → stop
+```
+
+The philosophy is simple: AI should work through a process, not just produce a confident answer. A loopflow defines who does the work, who checks it, what counts as success, how many attempts are allowed, where evidence is saved, and when the run must stop instead of guessing.
 
 ## Install
 
@@ -14,19 +28,19 @@ Normal chains are linear. Real work is not. A reviewer may request changes, a bu
 pi install npm:pi-loopflows
 ```
 
-Or from GitHub:
+`pi-loopflows` uses Pi subagent definitions as its first backend. Install `pi-subagents` if you have not already:
 
 ```bash
-pi install https://github.com/nik1t7n/pi-loopflows
+pi install npm:pi-subagents
 ```
 
-Reload Pi after installing:
+Then reload Pi:
 
 ```text
 /reload
 ```
 
-## What it adds
+## What you get
 
 ### Tool
 
@@ -45,9 +59,15 @@ loopflow_run({
 /loopflow launch-control -- Implement this approved backend plan
 ```
 
-### Bundled loopflow
+### Built-in loopflows
 
-`launch-control`:
+- `launch-control` — plan-as-contract implementation loop with builder/reviewer feedback and final audit.
+- `build-review` — small generic build → review → fix loop for scoped implementation tasks.
+- `plan-review` — planning loop that lets a reviewer reject vague or unsafe plans before implementation.
+
+## Built-in: Launch Control
+
+Launch Control is bundled because it is the clearest example of why loopflows exist. It turns a plan into a controlled implementation process:
 
 ```text
 context-builder
@@ -61,19 +81,59 @@ context-builder
   → final audit
 ```
 
+Use it when drift, skipped validation, PR correctness, or multi-step delivery risk matter.
+
+Example:
+
+```text
+/loopflow launch-control -- Implement the auth migration plan in docs/auth-plan.md
+```
+
+Launch Control is not hard-coded. It is just a `.loopflow.json` file. You can copy it, change the agents, change the prompts, adjust max iterations, add stricter gates, or create a project-specific version in `.pi/loopflows/`.
+
+## Loopflows as a constructor
+
+Think of loopflows as LEGO for agent processes. A loopflow can use any available Pi subagent role:
+
+- `context-builder`
+- `scout`
+- `researcher`
+- `planner`
+- `worker`
+- `reviewer`
+- `oracle`
+- your own custom agents
+
+You decide:
+
+- which agent runs first;
+- what each agent receives;
+- which output is saved;
+- which step is a gate;
+- what statuses mean pass, retry, or stop;
+- how many loop iterations are allowed;
+- where artifacts go;
+- what final audit should prove.
+
+Today, the backend runs Pi-compatible subagents. The engine is intentionally built behind an adapter boundary, so future versions can add other compatible backends — Codex CLI, OpenCode, ACP workers, remote agents, or custom executors — without changing the loopflow concept.
+
 ## Loopflow files
 
-Loopflows are JSON files named `*.loopflow.json`.
+Loopflows are JSON files named:
+
+```text
+*.loopflow.json
+```
 
 Discovery locations:
 
-- bundled package `loopflows/`
-- user: `~/.pi/agent/loopflows/`
-- project: `.pi/loopflows/`
+- bundled package loopflows;
+- user loopflows: `~/.pi/agent/loopflows/`;
+- project loopflows: `.pi/loopflows/`.
 
-Project loopflows can override or add workflows for a repo.
+Project loopflows are the easiest way to customize behavior for one repo.
 
-## Minimal shape
+## Minimal example
 
 ```json
 {
@@ -114,14 +174,39 @@ Project loopflows can override or add workflows for a repo.
 
 ## Template variables
 
-- `{task}` — original user task
-- `{previous}` — previous step output
-- `{outputs.stepId}` — output from a named step
-- `{outputs.stepId.status}` — parsed gate status
-- `{outputs.stepId.json}` — parsed gate JSON
-- `{loop.iteration}` — current loop iteration
-- `{artifactsDir}` — current run artifact directory
-- `{params.name}` — runtime params passed to `loopflow_run`
+- `{task}` — original user task.
+- `{previous}` — previous step output.
+- `{outputs.stepId}` — output from a named step.
+- `{outputs.stepId.output}` — same as above, explicit form.
+- `{outputs.stepId.status}` — parsed gate status.
+- `{outputs.stepId.json}` — parsed gate JSON.
+- `{loop.iteration}` — current loop iteration.
+- `{artifactsDir}` — current run artifact directory.
+- `{params.name}` — runtime params passed to `loopflow_run`.
+
+## Gate contract
+
+Gate steps should return JSON. A typical reviewer gate returns:
+
+```json
+{
+  "status": "approved",
+  "summary": "The implementation satisfies the plan.",
+  "findings": [],
+  "validation_gaps": [],
+  "requires_user_decision": false
+}
+```
+
+Common statuses:
+
+- `approved` — move forward.
+- `changes_requested` — loop back for another pass.
+- `blocked` — stop; user or environment action is required.
+- `complete` — final audit passed.
+- `incomplete` — final audit failed.
+
+Each loopflow decides which statuses pass, retry, or stop.
 
 ## Artifacts
 
@@ -131,7 +216,7 @@ Every run writes evidence to:
 <cwd>/.pi/loopflows/runs/<timestamp>-<workflow>/
 ```
 
-Typical files:
+Typical artifacts:
 
 ```text
 task.md
@@ -144,30 +229,92 @@ final-audit.json
 summary.md
 ```
 
+This makes loopflows inspectable. You can see what each agent claimed, what the gate decided, and why the run stopped or passed.
+
+## Customization patterns
+
+### Make Launch Control stricter
+
+Copy the bundled file:
+
+```bash
+mkdir -p .pi/loopflows
+cp ~/.pi/agent/npm/node_modules/pi-loopflows/loopflows/launch-control.loopflow.json \
+  .pi/loopflows/launch-control.loopflow.json
+```
+
+Then edit the project copy. Common changes:
+
+- increase `maxIterations`;
+- change `reviewer` to a custom security reviewer;
+- add stricter validation language;
+- add a docs or migration audit step;
+- change stop statuses;
+- make the final audit require `complete` only.
+
+### Create a lightweight workflow
+
+Use `build-review` for small implementation tasks where full Launch Control is too formal.
+
+```text
+/loopflow build-review -- Add validation to the import endpoint
+```
+
+### Review a plan before coding
+
+Use `plan-review` when you want a plan to be checked before a worker touches files.
+
+```text
+/loopflow plan-review -- Plan the database migration for workspace roles
+```
+
 ## Backend design
 
-The engine uses an executor adapter boundary:
+The runtime uses an executor adapter boundary:
 
 ```ts
 runAgent(agent, task, options) -> StepResult
 ```
 
-Current backend: Pi subprocess agents compatible with `pi-subagents` agent definitions.
+Current backend:
 
-Future backends can support Codex CLI, OpenCode, ACP-based workers, remote workers, or other agent runtimes without changing loopflow definitions.
+- Pi subprocess agents compatible with `pi-subagents` agent definitions.
 
-## Requirements
+Future-compatible backend ideas:
 
-- Pi coding agent
-- `pi-subagents` installed for the bundled agent roles:
+- Codex CLI workers;
+- OpenCode workers;
+- ACP-compatible agents;
+- remote worker pools;
+- project-specific executors.
 
-```bash
-pi install npm:pi-subagents
+The point is that loopflows describe the process. The backend decides how each agent is actually executed.
+
+## When to use loopflows vs chains
+
+Use normal Pi subagent chains when the process is linear:
+
+```text
+scout → planner → worker
 ```
+
+Use loopflows when a step can send work backward or stop the process:
+
+```text
+worker → reviewer → worker → reviewer
+```
+
+If you need a feedback loop, a quality gate, a max iteration limit, or saved evidence, use a loopflow.
 
 ## Status
 
-Early but usable. The core model is intentionally small: steps, loops, gates, artifacts, and adapters.
+`pi-loopflows` is early, but designed as a real product surface rather than a one-off script. The core model is intentionally small:
+
+```text
+steps + loops + gates + artifacts + adapters
+```
+
+That is enough to build useful workflows without turning the extension into a giant orchestration platform.
 
 ## License
 
