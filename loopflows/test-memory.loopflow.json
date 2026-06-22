@@ -1,0 +1,56 @@
+{
+  "name": "test-memory",
+  "version": "1.0.0",
+  "description": "Validation loopflow to test Observational Memory (Observer and Reflector) and agentmemory integration.",
+  "backend": "pi-subprocess",
+  "defaults": {
+    "agentScope": "both"
+  },
+  "steps": [
+    {
+      "id": "init",
+      "agent": "planner",
+      "output": "init.md",
+      "task": "Create an ultra-short plan of 2 tasks: 1. Generate a poem about memory. 2. Critique the poem."
+    },
+    {
+      "loop": {
+        "id": "test-loop",
+        "maxIterations": 2,
+        "gateStep": "critique",
+        "passStatuses": ["approved"],
+        "retryStatuses": ["changes_requested"],
+        "stopStatuses": ["blocked"],
+        "onExhausted": "continue",
+        "memory": {
+          "observational": true,
+          "compressAfterIterations": 1,
+          "messageTokensThreshold": 50,
+          "observationTokensThreshold": 100,
+          "observerAgent": "planner",
+          "reflectorAgent": "planner"
+        },
+        "body": [
+          {
+            "id": "generate",
+            "agent": "worker",
+            "output": "poem-{loop.iteration}.md",
+            "task": "Write a 4-line poem about digital memory. If {loop.iteration} == 1, make it normal. If {loop.iteration} == 2, follow the reviewer's changes requested. Previous history:\nObservations: {loop.observations}\nReflections: {loop.reflections}"
+          },
+          {
+            "id": "critique",
+            "agent": "reviewer",
+            "output": "critique-{loop.iteration}.json",
+            "gate": {
+              "type": "json-status",
+              "passStatuses": ["approved"],
+              "retryStatuses": ["changes_requested"],
+              "stopStatuses": ["blocked"]
+            },
+            "task": "Analyze the poem from generation {loop.iteration}.\n\nCRITICAL RULE: If the generation {loop.iteration} is 1, you MUST return status 'changes_requested' and ask to add the word 'neon' in the next iteration. If generation is 2, you MUST return status 'approved'.\n\nReturn ONLY JSON:\n{\n  \"status\": \"approved\" | \"changes_requested\",\n  \"summary\": \"your verdict\"\n}"
+          }
+        ]
+      }
+    }
+  ]
+}

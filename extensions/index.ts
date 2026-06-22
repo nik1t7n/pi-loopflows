@@ -6,6 +6,14 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { matchesKey, Key } from "@earendil-works/pi-tui";
+
+interface Component {
+  render(width: number): string[];
+  handleInput?(data: string): void;
+  wantsKeyRelease?: boolean;
+  invalidate(): void;
+}
 
 type BackendName = "pi-subprocess";
 type GateStatus = "approved" | "changes_requested" | "blocked" | "complete" | "incomplete" | string;
@@ -20,6 +28,15 @@ type StepDef = {
   tools?: string[];
 };
 
+type LoopMemoryDef = {
+  observational?: boolean;
+  compressAfterIterations?: number;
+  observerAgent?: string;
+  reflectorAgent?: string;
+  messageTokensThreshold?: number;
+  observationTokensThreshold?: number;
+};
+
 type LoopDef = {
   id: string;
   maxIterations: number;
@@ -29,6 +46,7 @@ type LoopDef = {
   retryStatuses?: string[];
   stopStatuses?: string[];
   onExhausted?: "stop" | "continue";
+  memory?: LoopMemoryDef;
 };
 
 type WorkflowNode = StepDef | { loop: LoopDef };
@@ -77,6 +95,117 @@ type RunContext = {
   sequence: StepResult[];
   params: Record<string, any>;
 };
+
+type TuiState = {
+  workflowName: string;
+  task: string;
+  activeAgent: string;
+  activeStep: string;
+  activeIteration: number;
+  currentStatus: string;
+  thoughtsLog: string[];
+  viewMode: "general" | "thoughts";
+  sequence: StepResult[];
+};
+
+class LoopflowOverlay implements Component {
+  private state: TuiState;
+  private onClose: () => void;
+  
+  constructor(state: TuiState, onClose: () => void) {
+    this.state = state;
+    this.onClose = onClose;
+  }
+
+  render(width: number): string[] {
+    const lines: string[] = [];
+    const border = "─".repeat(width - 2);
+    
+    // Title
+    lines.push(`┌${border}┐`);
+    const titleText = `Loopflow Live: ${this.state.workflowName}`;
+    const cleanTitle = titleText.replace(/\x1b\[[0-9;]*m/g, "");
+    lines.push(`│ \x1b[1m\x1b[33m${titleText}\x1b[0m` + " ".repeat(Math.max(0, width - 2 - cleanTitle.length)) + "│");
+    lines.push(`├${border}┤`);
+
+    // Active details
+    const stepStr = this.state.activeStep || "none";
+    const agentStr = this.state.activeAgent || "none";
+    const iterStr = this.state.activeIteration ? `Iteration: ${this.state.activeIteration}` : "none";
+    const detailText = `Step: ${stepStr} | Agent: ${agentStr} | ${iterStr}`;
+    const cleanDetail = detailText.replace(/\x1b\[[0-9;]*m/g, "");
+    lines.push(`│ Step: \x1b[32m${stepStr}\x1b[0m | Agent: \x1b[36m${agentStr}\x1b[0m | ${iterStr}` + " ".repeat(Math.max(0, width - 2 - cleanDetail.length)) + "│");
+    
+    const statusText = `Status: ${this.state.currentStatus}`;
+    const cleanStatus = statusText.replace(/\x1b\[[0-9;]*m/g, "");
+    lines.push(`│ Status: \x1b[35m${this.state.currentStatus}\x1b[0m` + " ".repeat(Math.max(0, width - 2 - cleanStatus.length)) + "│");
+    lines.push(`├${border}┤`);
+
+    // Tab Header
+    const isGen = this.state.viewMode === "general";
+    const tab1 = isGen ? "\x1b[7m [1] GENERAL MAP \x1b[27m" : " [1] GENERAL MAP ";
+    const tab2 = !isGen ? "\x1b[7m [2] AGENT THOUGHTS \x1b[27m" : " [2] AGENT THOUGHTS ";
+    const tabsUnstyled = " [1] GENERAL MAP  [2] AGENT THOUGHTS ";
+    lines.push(`│${tab1}${tab2}` + " ".repeat(Math.max(0, width - 2 - tabsUnstyled.length)) + "│");
+    lines.push(`├${border}┤`);
+
+    // Content area
+    const contentWidth = width - 4;
+    const maxLines = 12;
+    
+    if (this.state.viewMode === "general") {
+      const mapLines: string[] = [];
+      mapLines.push("\x1b[1m=== Workflow Steps & Statuses ===\x1b[0m");
+      this.state.sequence.forEach((res, idx) => {
+        const iterSuffix = res.iteration ? `#${res.iteration}` : "";
+        const statusSuffix = res.status ? ` -> \x1b[33m${res.status}\x1b[0m` : "";
+        const exitColor = res.exitCode === 0 ? "\x1b[32m" : "\x1b[31m";
+        mapLines.push(`${idx + 1}. ${res.id}${iterSuffix} (${res.agent}) - ${exitColor}exit ${res.exitCode}\x1b[0m${statusSuffix}`);
+      });
+      
+      while (mapLines.length < maxLines) {
+        mapLines.push("");
+      }
+      
+      mapLines.slice(0, maxLines).forEach(ln => {
+        const plainLength = ln.replace(/\x1b\[[0-9;]*m/g, "").length;
+        lines.push(`│ ${ln}` + " ".repeat(Math.max(0, contentWidth - plainLength)) + " │");
+      });
+    } else {
+      const logLines = this.state.thoughtsLog.slice(-maxLines);
+      while (logLines.length < maxLines) {
+        logLines.unshift("");
+      }
+      
+      logLines.forEach(ln => {
+        const plainLength = ln.replace(/\x1b\[[0-9;]*m/g, "").length;
+        let displayLine = ln;
+        if (plainLength > contentWidth) {
+          displayLine = ln.slice(0, contentWidth - 3) + "...";
+        }
+        const finalPlain = displayLine.replace(/\x1b\[[0-9;]*m/g, "").length;
+        lines.push(`│ ${displayLine}` + " ".repeat(Math.max(0, contentWidth - finalPlain)) + " │");
+      });
+    }
+
+    lines.push(`├${border}┤`);
+    const footerText = "Press [Tab/1/2] to Toggle View | [Esc/q] to Close";
+    lines.push(`│ \x1b[2m${footerText}\x1b[0m` + " ".repeat(Math.max(0, width - 2 - footerText.length)) + "│");
+    lines.push(`└${border}┘`);
+
+    return lines;
+  }
+
+  handleInput(data: string) {
+    if (matchesKey(data, Key.escape) || matchesKey(data, "q")) {
+      this.onClose();
+    } else if (matchesKey(data, Key.tab) || matchesKey(data, "1") || matchesKey(data, "2")) {
+      this.state.viewMode = this.state.viewMode === "general" ? "thoughts" : "general";
+    }
+  }
+
+  invalidate() {}
+}
 
 type GateDef = {
   type?: "json-status";
@@ -198,6 +327,8 @@ function renderTemplate(template: string, ctx: RunContext, iteration?: number): 
     if (key === "artifactsDir") return ctx.artifactsDir;
     if (key === "previous") return ctx.sequence.at(-1)?.output ?? "";
     if (key === "loop.iteration") return String(iteration ?? "");
+    if (key === "loop.observations") return String(ctx.params.observations ?? "");
+    if (key === "loop.reflections") return String(ctx.params.reflections ?? "");
     if (key.startsWith("params.")) return String(ctx.params[key.slice(7)] ?? "");
     if (key.startsWith("outputs.")) {
       const rest = key.slice(8);
@@ -262,31 +393,57 @@ async function writePrompt(agentName: string, prompt: string) {
 }
 
 interface ExecutorAdapter {
-  runAgent(agent: string, task: string, options: { cwd: string; signal?: AbortSignal; model?: string; tools?: string[]; scope: "user" | "project" | "both" }): Promise<{ output: string; exitCode: number; stderr: string }>;
+  runAgent(agent: string, task: string, options: { cwd: string; signal?: AbortSignal; model?: string; tools?: string[]; scope: "user" | "project" | "both"; overrideSystemPrompt?: string; onAgentEvent?: (event: any) => void }): Promise<{ output: string; exitCode: number; stderr: string }>;
 }
 
 class PiSubprocessAdapter implements ExecutorAdapter {
-  async runAgent(agentName: string, task: string, options: { cwd: string; signal?: AbortSignal; model?: string; tools?: string[]; scope: "user" | "project" | "both" }) {
+  async runAgent(agentName: string, task: string, options: { cwd: string; signal?: AbortSignal; model?: string; tools?: string[]; scope: "user" | "project" | "both"; overrideSystemPrompt?: string; onAgentEvent?: (event: any) => void }) {
     const agents = discoverAgents(options.cwd, options.scope);
     const agent = agents.get(agentName);
-    if (!agent) {
+    if (!agent && !options.overrideSystemPrompt) {
       return { output: "", exitCode: 1, stderr: `Unknown agent ${agentName}. Available: ${[...agents.keys()].sort().join(", ")}` };
     }
     const args = ["--mode", "json", "-p", "--no-session"];
-    const model = options.model ?? agent.model;
-    const tools = options.tools ?? agent.tools;
+    const model = options.model ?? agent?.model;
+    const tools = options.tools ?? agent?.tools;
     if (model) args.push("--model", model);
     if (tools?.length) args.push("--tools", tools.join(","));
-    const tmp = agent.systemPrompt.trim() ? await writePrompt(agentName, agent.systemPrompt) : undefined;
+    
+    const systemPrompt = options.overrideSystemPrompt ?? agent?.systemPrompt ?? "";
+    const tmp = systemPrompt.trim() ? await writePrompt(agentName, systemPrompt) : undefined;
     if (tmp) args.push("--append-system-prompt", tmp.file);
     args.push(task);
 
     const invocation = getPiInvocation(args);
     let stdout = "";
     let stderr = "";
+    
     const exitCode = await new Promise<number>((resolve) => {
       const proc = spawn(invocation.command, invocation.args, { cwd: options.cwd, stdio: ["ignore", "pipe", "pipe"] });
-      proc.stdout.on("data", (d) => { stdout += d.toString(); });
+      
+      let buffer = "";
+      proc.stdout.on("data", (d) => {
+        const chunk = d.toString();
+        stdout += chunk;
+        buffer += chunk;
+        
+        let idx;
+        while ((idx = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, idx).trim();
+          buffer = buffer.slice(idx + 1);
+          
+          if (!line) continue;
+          try {
+            const ev = JSON.parse(line);
+            if (options.onAgentEvent) {
+              options.onAgentEvent(ev);
+            }
+          } catch {
+            // Incomplete line, keep buffering
+          }
+        }
+      });
+      
       proc.stderr.on("data", (d) => { stderr += d.toString(); });
       proc.on("close", (code) => resolve(code ?? 0));
       proc.on("error", (err) => { stderr += String(err?.message ?? err); resolve(1); });
@@ -310,9 +467,84 @@ async function saveArtifact(ctx: RunContext, name: string, content: string): Pro
   return file;
 }
 
-async function runStep(def: StepDef, ctx: RunContext, adapter: ExecutorAdapter, scope: "user" | "project" | "both", signal: AbortSignal | undefined, iteration?: number): Promise<StepResult> {
-  const task = renderTemplate(def.task, ctx, iteration);
-  const run = await adapter.runAgent(def.agent, task, { cwd: ctx.cwd, signal, model: def.model, tools: def.tools, scope });
+function estimateTokens(text: string): number {
+  if (!text) return 0;
+  return Math.ceil(text.length / 3.5);
+}
+
+async function queryAgentMemory(task: string, cwd: string): Promise<string> {
+  const agentmemoryUrl = process.env.AGENTMEMORY_URL || "http://127.0.0.1:3111";
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 800);
+    const response = await fetch(`${agentmemoryUrl}/agentmemory/search`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: task, limit: 5 }),
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) return "";
+    const data = await response.json() as any;
+    if (!Array.isArray(data?.results) || data.results.length === 0) return "";
+    return [
+      "<relevant_project_memory>",
+      ...data.results.slice(0, 5).map((r: any) => {
+        const obs = r.observation ?? {};
+        const title = obs.title || obs.subtitle || "Memory";
+        const body = obs.narrative || obs.text || JSON.stringify(obs);
+        return `- [${obs.timestamp || "Recall"}] ${title}: ${body}`;
+      }),
+      "</relevant_project_memory>\n\n"
+    ].join("\n");
+  } catch {
+    return "";
+  }
+}
+
+function parseObserverOutput(output: string) {
+  let observations = "";
+  let currentTask = "";
+  let suggestedAction = "";
+
+  const obsIndex = output.indexOf("### Observations");
+  const taskIndex = output.indexOf("### Current Task");
+  const nextIndex = output.indexOf("### Suggested Next Action");
+
+  if (obsIndex >= 0) {
+    const end = taskIndex >= 0 ? taskIndex : (nextIndex >= 0 ? nextIndex : output.length);
+    observations = output.slice(obsIndex + "### Observations".length, end).trim();
+  } else {
+    // If no heading is found, try to find any list or use the whole text
+    observations = output;
+  }
+  
+  if (taskIndex >= 0) {
+    const end = nextIndex >= 0 ? nextIndex : output.length;
+    currentTask = output.slice(taskIndex + "### Current Task".length, end).trim();
+  }
+  
+  if (nextIndex >= 0) {
+    suggestedAction = output.slice(nextIndex + "### Suggested Next Action".length).trim();
+  }
+
+  return {
+    observations: observations || output,
+    currentTask: currentTask || "Continuing loopflow execution.",
+    suggestedNextAction: suggestedAction || "Proceed to the next planned step."
+  };
+}
+
+async function runStep(def: StepDef, ctx: RunContext, adapter: ExecutorAdapter, scope: "user" | "project" | "both", signal: AbortSignal | undefined, iteration?: number, onAgentEvent?: (event: any) => void): Promise<StepResult> {
+  let task = renderTemplate(def.task, ctx, iteration);
+  
+  // Auto-inject agentmemory context (CLI-first via API)
+  const memoryContext = await queryAgentMemory(task, ctx.cwd);
+  if (memoryContext) {
+    task = memoryContext + task;
+  }
+
+  const run = await adapter.runAgent(def.agent, task, { cwd: ctx.cwd, signal, model: def.model, tools: def.tools, scope, onAgentEvent });
   const json = def.gate ? extractJson(run.output) : undefined;
   const status = json?.status;
   const artifactName = def.output ? renderTemplate(def.output, ctx, iteration) : `${safeName(def.id)}${iteration ? `-${iteration}` : ""}.${def.gate ? "json" : "md"}`;
@@ -328,15 +560,276 @@ function statusIn(status: GateStatus | undefined, values: string[] | undefined, 
   return !!status && (values ?? fallback).includes(status);
 }
 
-async function runLoop(loop: LoopDef, ctx: RunContext, adapter: ExecutorAdapter, scope: "user" | "project" | "both", signal: AbortSignal | undefined): Promise<StepResult> {
+async function runOMCompression(
+  loop: LoopDef,
+  ctx: RunContext,
+  adapter: ExecutorAdapter,
+  scope: "user" | "project" | "both",
+  signal: AbortSignal | undefined,
+  currentIteration: number,
+  tuiState?: TuiState,
+  triggerRender?: () => void
+) {
+  const compressAfter = loop.memory?.compressAfterIterations ?? 2;
+  const lastObservedIndex = ctx.params.lastObservedIndex ?? 0;
+  const unobservedSteps = ctx.sequence.slice(lastObservedIndex);
+  
+  const debugLines: string[] = [
+    `currentIteration: ${currentIteration}`,
+    `compressAfter: ${compressAfter}`,
+    `lastObservedIndex: ${lastObservedIndex}`,
+    `unobservedSteps count: ${unobservedSteps.length}`
+  ];
+
+  if (unobservedSteps.length === 0) {
+    debugLines.push("No unobserved steps. Returning early.");
+    await saveArtifact(ctx, `om-debug-${currentIteration}.txt`, debugLines.join("\n"));
+    return;
+  }
+
+  const unobservedIterations = new Set(unobservedSteps.map(s => s.iteration).filter(Boolean));
+  const completedIterations = unobservedIterations.size;
+  const unobservedTokens = unobservedSteps.reduce((sum, s) => sum + estimateTokens(s.output), 0);
+  const tokenThreshold = loop.memory?.messageTokensThreshold ?? 10000;
+
+  debugLines.push(`completedIterations: ${completedIterations}`);
+  debugLines.push(`unobservedTokens: ${unobservedTokens}`);
+  debugLines.push(`tokenThreshold: ${tokenThreshold}`);
+
+  const trigger = completedIterations >= compressAfter || unobservedTokens >= tokenThreshold;
+  debugLines.push(`trigger: ${trigger}`);
+
+  if (trigger) {
+    const observerAgent = loop.memory?.observerAgent ?? "planner";
+    debugLines.push(`observerAgent: ${observerAgent}`);
+    
+    if (tuiState) {
+      tuiState.activeStep = "OM Observer";
+      tuiState.activeAgent = observerAgent;
+      tuiState.currentStatus = "Compressing past iterations' raw logs...";
+      tuiState.thoughtsLog.push("[Observer] Compression triggered due to limit.");
+      triggerRender?.();
+    }
+
+    const rawLogToObserve = unobservedSteps.map(step => {
+      return `### Step: ${step.id} (Iteration: ${step.iteration ?? "none"}, Agent: ${step.agent})
+Exit Code: ${step.exitCode}
+Status: ${step.status ?? "none"}
+Output:
+${step.output}
+`;
+    }).join("\n---\n\n");
+
+    const previousObservations = ctx.params.observations ?? "No previous observations.";
+
+    const observerTask = `Original Task:
+${ctx.task}
+
+Previous Observation Log:
+${previousObservations}
+
+Raw Execution Log of Recent Steps to Observe:
+${rawLogToObserve}
+
+Analyze these raw execution outputs and update the observation log. Output your response strictly matching the specified format.`;
+
+    const observerSystemPrompt = `You are an Execution Observer. Your task is to analyze the raw execution outputs of the recent workflow steps and append new, concise chronological observations to the existing observation log.
+
+=== CONCISE GUIDELINES ===
+- Be specific: "Step 'build' failed with ReferenceError: x is not defined" not "Step failed" (too vague).
+- Use terse language: write dense sentences without unnecessary filler words to save tokens.
+- Do not repeat observations that have already been captured in the log.
+- When steps execute commands or tools, observe what was executed, why, and what was learned.
+- Include exact line numbers, paths, or return statuses when observing file changes or command execution.
+
+=== OUTPUT FORMAT ===
+Your response must strictly follow this format:
+
+### Observations
+- [Iteration X] Step Y: <Observation 1>
+- [Iteration X] Step Y: <Observation 2>
+
+### Current Task
+<A concise single-sentence summary of the active objective or roadblock being addressed.>
+
+### Suggested Next Action
+<A single-sentence instruction for what the next step/agent should focus on.>`;
+
+    try {
+      debugLines.push("Invoking runAgent on observer...");
+      const observerRun = await adapter.runAgent(observerAgent, observerTask, {
+        cwd: ctx.cwd,
+        signal,
+        overrideSystemPrompt: observerSystemPrompt,
+        scope
+      });
+
+      debugLines.push(`Observer exitCode: ${observerRun.exitCode}`);
+      debugLines.push(`Observer output: ${observerRun.output.slice(0, 200)}...`);
+
+      if (observerRun.exitCode === 0) {
+        const parsed = parseObserverOutput(observerRun.output);
+        const existingObs = ctx.params.observations ? ctx.params.observations + "\n" : "";
+        ctx.params.observations = existingObs + parsed.observations;
+        ctx.params.currentTask = parsed.currentTask;
+        ctx.params.suggestedNextAction = parsed.suggestedNextAction;
+        
+        debugLines.push(`Parsed observations count: ${estimateTokens(parsed.observations)} tokens`);
+        
+        if (tuiState) {
+          tuiState.thoughtsLog.push("[Observer] Compression completed successfully.");
+          triggerRender?.();
+        }
+
+        // Context Swapping: Prune observed steps' outputs to save tokens
+        for (const step of unobservedSteps) {
+          step.output = `[Archived in loop.observations]`;
+          if (step.json) {
+            step.json = { archived: true, status: step.status };
+          }
+        }
+        
+        ctx.params.lastObservedIndex = ctx.sequence.length;
+        await saveArtifact(ctx, `om-observations-${currentIteration}.md`, `### Updated Observations\n${ctx.params.observations}\n\n### Current Task\n${ctx.params.currentTask}\n\n### Suggested Next Action\n${ctx.params.suggestedNextAction}`);
+      } else {
+        debugLines.push(`Observer failed. Stderr: ${observerRun.stderr}`);
+        const fallbackObs = `\n- [Iteration ${currentIteration - 1}] Fallback: Steps completed without Observer compression.`;
+        ctx.params.observations = (ctx.params.observations ?? "") + fallbackObs;
+        ctx.params.lastObservedIndex = ctx.sequence.length;
+      }
+    } catch (err: any) {
+      debugLines.push(`Observer exception: ${err?.message || err}`);
+      const fallbackObs = `\n- [Iteration ${currentIteration - 1}] Fallback: Steps completed without Observer compression.`;
+      ctx.params.observations = (ctx.params.observations ?? "") + fallbackObs;
+      ctx.params.lastObservedIndex = ctx.sequence.length;
+    }
+
+    // Check Reflector threshold
+    const observationTokens = estimateTokens(ctx.params.observations ?? "");
+    const reflectionThreshold = loop.memory?.observationTokensThreshold ?? 15000;
+    debugLines.push(`observationTokens: ${observationTokens}`);
+    debugLines.push(`reflectionThreshold: ${reflectionThreshold}`);
+    
+    if (observationTokens >= reflectionThreshold) {
+      debugLines.push("Triggering Reflector...");
+      const reflectorSystemPrompt = `You are an Execution Reflector. Your task is to consolidate and compress a long, redundant log of workflow observations into a high-level summary of reflections, patterns, and current progress.
+
+=== GUIDELINES ===
+- Merge repetitive, circular, or redundant steps into a single, high-level summary statement.
+- Identify persistent patterns, systemic roadblocks, or key lessons learned across the entire execution history.
+- Clearly state the definitive current progress relative to the ultimate goal.
+- Output only dense, high-impact bullet points. Do not add conversational framing or filler words.
+
+=== OUTPUT FORMAT ===
+### Consolidated Reflections
+- <Reflection 1>
+- <Reflection 2>
+
+### Systemic Roadblocks & Lessons
+- <Roadblock/Lesson 1>
+
+### Current Goals Status
+- <Status 1>`;
+
+      const reflectorTask = `Original Task:
+${ctx.task}
+
+Observation Log to Consolidate:
+${ctx.params.observations}
+
+Compress and reflect on these observations strictly matching the specified format.`;
+
+      const reflectorAgentName = loop.memory?.reflectorAgent ?? loop.memory?.observerAgent ?? "planner";
+      
+      if (tuiState) {
+        tuiState.activeStep = "OM Reflector";
+        tuiState.activeAgent = reflectorAgentName;
+        tuiState.currentStatus = "Consolidating observations into reflections...";
+        tuiState.thoughtsLog.push("[Reflector] Reflection triggered due to threshold.");
+        triggerRender?.();
+      }
+
+      try {
+        const reflectorRun = await adapter.runAgent(reflectorAgentName, reflectorTask, {
+          cwd: ctx.cwd,
+          signal,
+          overrideSystemPrompt: reflectorSystemPrompt,
+          scope
+        });
+
+        debugLines.push(`Reflector exitCode: ${reflectorRun.exitCode}`);
+
+        if (reflectorRun.exitCode === 0) {
+          ctx.params.reflections = reflectorRun.output;
+          ctx.params.observations = "Consolidated into reflections.\n\n" + (ctx.params.observations.slice(-4000));
+          
+          if (tuiState) {
+            tuiState.thoughtsLog.push("[Reflector] Reflection completed successfully.");
+            triggerRender?.();
+          }
+
+          await saveArtifact(ctx, `om-reflections-${currentIteration}.md`, ctx.params.reflections);
+        } else {
+          debugLines.push(`Reflector failed. Stderr: ${reflectorRun.stderr}`);
+        }
+      } catch (err: any) {
+        debugLines.push(`Reflector exception: ${err?.message || err}`);
+      }
+    }
+  }
+
+  await saveArtifact(ctx, `om-debug-${currentIteration}.txt`, debugLines.join("\n"));
+}
+
+async function runLoop(loop: LoopDef, ctx: RunContext, adapter: ExecutorAdapter, scope: "user" | "project" | "both", signal: AbortSignal | undefined, tuiState?: TuiState, triggerRender?: () => void): Promise<StepResult> {
+  await saveArtifact(ctx, `loop-debug.json`, JSON.stringify(loop, null, 2));
   const max = Math.max(1, loop.maxIterations);
   let lastGate: StepResult | undefined;
   for (let i = 1; i <= max; i++) {
+    // Run Observational Memory compression if enabled
+    if (i > 1 && loop.memory?.observational) {
+      await runOMCompression(loop, ctx, adapter, scope, signal, i, tuiState, triggerRender);
+    }
+
     await saveArtifact(ctx, `${safeName(loop.id)}/iteration-${i}.txt`, `Starting iteration ${i}/${max}\n`);
     for (const step of loop.body) {
+      if (tuiState) {
+        tuiState.activeStep = step.id;
+        tuiState.activeAgent = step.agent;
+        tuiState.activeIteration = i;
+        tuiState.currentStatus = `Running agent ${step.agent}...`;
+        tuiState.sequence = [...ctx.sequence];
+        tuiState.thoughtsLog.push(`[Workflow] Starting step: ${step.id} (Iteration: ${i})`);
+        triggerRender?.();
+      }
+
       const stepWithGate = step.id === loop.gateStep && !step.gate ? { ...step, gate: { type: "json-status" as const } } : step;
-      const result = await runStep(stepWithGate, ctx, adapter, scope, signal, i);
+      
+      const onAgentEvent = (ev: any) => {
+        if (!tuiState) return;
+        if (ev.type === "thinking" && ev.text) {
+          tuiState.thoughtsLog.push(`[Thinking] ${ev.text}`);
+          tuiState.currentStatus = `Thinking...`;
+          triggerRender?.();
+        } else if (ev.type === "tool_call" && ev.toolCall) {
+          tuiState.thoughtsLog.push(`[Tool Call] ${ev.toolCall.name}`);
+          tuiState.currentStatus = `Calling tool: ${ev.toolCall.name}`;
+          triggerRender?.();
+        } else if (ev.type === "tool_result" && ev.toolCall) {
+          tuiState.thoughtsLog.push(`[Tool Result] ${ev.toolCall.name} completed.`);
+          triggerRender?.();
+        }
+      };
+
+      const result = await runStep(stepWithGate, ctx, adapter, scope, signal, i, onAgentEvent);
       if (step.id === loop.gateStep) lastGate = result;
+      
+      if (tuiState) {
+        tuiState.sequence = [...ctx.sequence];
+        tuiState.thoughtsLog.push(`[Workflow] Completed step: ${step.id} (Exit Code: ${result.exitCode})`);
+        triggerRender?.();
+      }
+
       if (result.exitCode !== 0) return result;
     }
     const status = lastGate?.status;
@@ -351,7 +844,7 @@ async function runLoop(loop: LoopDef, ctx: RunContext, adapter: ExecutorAdapter,
   return lastGate ?? { id: loop.id, agent: "loop", output: "Loop had no gate result", exitCode: 1 };
 }
 
-async function runWorkflow(workflow: WorkflowDef, task: string, opts: { cwd: string; signal?: AbortSignal; params?: Record<string, any>; maxIterations?: number }) {
+async function runWorkflow(workflow: WorkflowDef, task: string, opts: { cwd: string; signal?: AbortSignal; params?: Record<string, any>; maxIterations?: number; extensionCtx?: any }) {
   const adapter = new PiSubprocessAdapter();
   const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${safeName(workflow.name)}`;
   const artifactsDir = path.join(opts.cwd, ".pi/loopflows/runs", runId);
@@ -362,16 +855,110 @@ async function runWorkflow(workflow: WorkflowDef, task: string, opts: { cwd: str
   await saveArtifact(ctx, "workflow.json", JSON.stringify(workflow, null, 2));
   await saveArtifact(ctx, "task.md", task);
 
+  const tuiState: TuiState | undefined = opts.extensionCtx ? {
+    workflowName: workflow.name,
+    task,
+    activeAgent: "",
+    activeStep: "",
+    activeIteration: 0,
+    currentStatus: "Starting workflow...",
+    thoughtsLog: ["[Workflow] Initialized."],
+    viewMode: "general",
+    sequence: []
+  } : undefined;
+
+  let uiHandle: any = undefined;
+  const updateWidget = () => {
+    if (!opts.extensionCtx || !tuiState) return;
+    try {
+      opts.extensionCtx.ui.setWidget("loopflow-status", [
+        `┌── Loopflow Status: ${tuiState.workflowName} ──┐`,
+        `│ Step: \x1b[32m${tuiState.activeStep || "none"}\x1b[0m | Agent: \x1b[36m${tuiState.activeAgent || "none"}\x1b[0m | Iteration: ${tuiState.activeIteration || "none"}`,
+        `│ Status: \x1b[35m${tuiState.currentStatus}\x1b[0m`,
+        `└──────────────────────────────────────┘`
+      ]);
+    } catch {
+      // Ignore
+    }
+  };
+
+  const triggerRender = () => {
+    uiHandle?.requestRender?.();
+    updateWidget();
+  };
+
+  if (opts.extensionCtx && tuiState) {
+    try {
+      updateWidget();
+      uiHandle = opts.extensionCtx.ui.custom((tui: any, theme: any, keybindings: any, done: any) => {
+        return new LoopflowOverlay(tuiState, done);
+      }, {
+        overlay: true,
+        overlayOptions: {
+          width: "40%",
+          anchor: "right-center",
+          margin: 1
+        },
+        onHandle: (h: any) => {
+          uiHandle = h;
+        }
+      });
+    } catch {
+      // Ignore if not in interactive mode
+    }
+  }
+
   for (const node of workflow.steps) {
     if ("loop" in node) {
       const loop = { ...node.loop };
       if (opts.maxIterations) loop.maxIterations = opts.maxIterations;
-      const result = await runLoop(loop, ctx, adapter, scope, opts.signal);
+      const result = await runLoop(loop, ctx, adapter, scope, opts.signal, tuiState, triggerRender);
       if (result.exitCode !== 0 || String(result.status ?? "").startsWith("exhausted") || statusIn(result.status, loop.stopStatuses, ["blocked"])) break;
     } else {
-      const result = await runStep(node, ctx, adapter, scope, opts.signal);
+      if (tuiState) {
+        tuiState.activeStep = node.id;
+        tuiState.activeAgent = node.agent;
+        tuiState.activeIteration = 0;
+        tuiState.currentStatus = `Running agent ${node.agent}...`;
+        tuiState.thoughtsLog.push(`[Workflow] Starting step: ${node.id}`);
+        triggerRender();
+      }
+
+      const onAgentEvent = (ev: any) => {
+        if (!tuiState) return;
+        if (ev.type === "thinking" && ev.text) {
+          tuiState.thoughtsLog.push(`[Thinking] ${ev.text}`);
+          tuiState.currentStatus = `Thinking...`;
+          triggerRender();
+        } else if (ev.type === "tool_call" && ev.toolCall) {
+          tuiState.thoughtsLog.push(`[Tool Call] ${ev.toolCall.name}`);
+          tuiState.currentStatus = `Calling tool: ${ev.toolCall.name}`;
+          triggerRender();
+        } else if (ev.type === "tool_result" && ev.toolCall) {
+          tuiState.thoughtsLog.push(`[Tool Result] ${ev.toolCall.name} completed.`);
+          triggerRender();
+        }
+      };
+
+      const result = await runStep(node, ctx, adapter, scope, opts.signal, undefined, onAgentEvent);
+      
+      if (tuiState) {
+        tuiState.sequence = [...ctx.sequence];
+        tuiState.thoughtsLog.push(`[Workflow] Completed step: ${node.id} (Exit Code: ${result.exitCode})`);
+        triggerRender();
+      }
+
       if (result.exitCode !== 0) break;
       if (node.gate && statusIn(result.status, node.gate.stopStatuses, ["blocked", "incomplete"])) break;
+    }
+  }
+
+  if (opts.extensionCtx) {
+    try {
+      opts.extensionCtx.ui.setWidget("loopflow-status", undefined);
+      uiHandle?.close?.();
+    } catch {
+      // Ignore
     }
   }
 
@@ -410,7 +997,7 @@ export default function (pi: ExtensionAPI) {
         return { content: [{ type: "text", text: `Unknown loopflow ${params.workflow}. Available: ${[...workflows.keys()].join(", ") || "none"}` }], details: {}, isError: true };
       }
       onUpdate?.({ content: [{ type: "text", text: `Running loopflow ${params.workflow}...` }], details: {} });
-      const result = await runWorkflow(found.workflow, params.task, { cwd: ctx.cwd, signal, params: params.params, maxIterations: params.maxIterations });
+      const result = await runWorkflow(found.workflow, params.task, { cwd: ctx.cwd, signal, params: params.params, maxIterations: params.maxIterations, extensionCtx: ctx });
       return { content: [{ type: "text", text: result.summary }], details: result };
     },
   });
@@ -442,7 +1029,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       ctx.ui.notify(`Running loopflow ${name}`, "info");
-      const result = await runWorkflow(found.workflow, task, { cwd: ctx.cwd });
+      const result = await runWorkflow(found.workflow, task, { cwd: ctx.cwd, extensionCtx: ctx });
       pi.sendMessage({ customType: "loopflow-result", content: result.summary, display: true, details: result }, { triggerTurn: false });
     },
   });
