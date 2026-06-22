@@ -941,17 +941,66 @@ async function runLoop(loop: LoopDef, ctx: RunContext, adapter: ExecutorAdapter,
       
       const onAgentEvent = (ev: any) => {
         if (!tuiState) return;
+        const agentName = step.agent;
+        if (!tuiState.agentLogs[agentName]) tuiState.agentLogs[agentName] = [];
+        
         if (ev.type === "thinking" && ev.text) {
-          tuiState.thoughtsLog.push(`[Thinking] ${ev.text}`);
+          tuiState.thoughtsLog.push(`\x1b[2m[Thinking] ${ev.text}\x1b[0m`);
+          tuiState.agentLogs[agentName].push(`\x1b[2m[Thinking] ${ev.text}\x1b[0m`);
           tuiState.currentStatus = `Thinking...`;
           triggerRender?.();
         } else if (ev.type === "tool_call" && ev.toolCall) {
-          tuiState.thoughtsLog.push(`[Tool Call] ${ev.toolCall.name}`);
+          const inputStr = ev.toolCall.input ? JSON.stringify(ev.toolCall.input) : "";
+          const logStr = `\x1b[33m[Tool Call] ${ev.toolCall.name}(${inputStr})\x1b[0m`;
+          tuiState.thoughtsLog.push(logStr);
+          tuiState.agentLogs[agentName].push(logStr);
           tuiState.currentStatus = `Calling tool: ${ev.toolCall.name}`;
           triggerRender?.();
         } else if (ev.type === "tool_result" && ev.toolCall) {
-          tuiState.thoughtsLog.push(`[Tool Result] ${ev.toolCall.name} completed.`);
+          let resStr = "";
+          if (ev.result) {
+            if (typeof ev.result === "string") resStr = ev.result;
+            else if (ev.result.content && Array.isArray(ev.result.content)) {
+              resStr = ev.result.content.map((c: any) => c.text || JSON.stringify(c)).join("\n");
+            } else {
+              resStr = JSON.stringify(ev.result);
+            }
+          }
+          if (resStr.length > 500) resStr = resStr.slice(0, 500) + "... [truncated]";
+          const logStr = `\x1b[32m[Tool Result] ${ev.toolCall.name} -> ${resStr}\x1b[0m`;
+          tuiState.thoughtsLog.push(logStr);
+          tuiState.agentLogs[agentName].push(logStr);
           triggerRender?.();
+        } else if (ev.type === "message_update" && ev.message?.content) {
+          const content = ev.message.content;
+          let text = "";
+          if (Array.isArray(content)) {
+            text = content.map((c: any) => c.type === "text" ? c.text : "").join("");
+          } else if (typeof content === "string") {
+            text = content;
+          }
+          if (text.trim()) {
+            const logStr = `\x1b[36m[Response] ${text}\x1b[0m`;
+            const logs = tuiState.agentLogs[agentName];
+            const thoughts = tuiState.thoughtsLog;
+            
+            const lastLog = logs[logs.length - 1];
+            if (lastLog && lastLog.startsWith("\x1b[36m[Response]")) {
+              logs[logs.length - 1] = logStr;
+            } else {
+              logs.push(logStr);
+            }
+            
+            const lastThought = thoughts[thoughts.length - 1];
+            if (lastThought && lastThought.startsWith("\x1b[36m[Response]")) {
+              thoughts[thoughts.length - 1] = logStr;
+            } else {
+              thoughts.push(logStr);
+            }
+            
+            tuiState.currentStatus = `Responding...`;
+            triggerRender?.();
+          }
         }
       };
 
@@ -1040,8 +1089,8 @@ async function runWorkflow(workflow: WorkflowDef, task: string, opts: { cwd: str
       }, {
         overlay: true,
         overlayOptions: {
-          width: "45%",
-          anchor: "right-center",
+          width: "95%",
+          anchor: "center",
           margin: 1
         },
         onHandle: (h: any) => {
@@ -1188,8 +1237,8 @@ export default function (pi: ExtensionAPI) {
         }, {
           overlay: true,
           overlayOptions: {
-            width: "45%",
-            anchor: "right-center",
+            width: "95%",
+            anchor: "center",
             margin: 1
           },
           onHandle: (h: any) => {
