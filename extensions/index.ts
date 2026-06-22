@@ -105,6 +105,7 @@ type TuiState = {
   currentStatus: string;
   thoughtsLog: string[];
   agentLogs: Record<string, string[]>;
+  liveLogIndexes?: Record<string, { global: number; agent: number }>;
   selectedAgent: string | null;
   viewMode: "general" | "thoughts";
   sequence: StepResult[];
@@ -563,50 +564,86 @@ function stringifyToolPayload(value: any, max = 700): string {
   return text.length > max ? `${text.slice(0, max)}... [truncated]` : text;
 }
 
-function appendTuiEventLog(tuiState: TuiState, agentName: string, logStr: string, triggerRender?: () => void, status?: string) {
+function maybeAppendSpacer(lines: string[]) {
+  if (lines.length > 0 && lines[lines.length - 1] !== "") lines.push("");
+}
+
+function appendTuiEventLog(tuiState: TuiState, agentName: string, logStr: string, triggerRender?: () => void, status?: string, block = false) {
   if (!tuiState.agentLogs[agentName]) tuiState.agentLogs[agentName] = [];
+  if (block) {
+    maybeAppendSpacer(tuiState.thoughtsLog);
+    maybeAppendSpacer(tuiState.agentLogs[agentName]);
+  }
   tuiState.thoughtsLog.push(logStr);
   tuiState.agentLogs[agentName].push(logStr);
   if (status) tuiState.currentStatus = status;
   triggerRender?.();
 }
 
+function updateTuiLiveLog(tuiState: TuiState, agentName: string, key: string, logStr: string, triggerRender?: () => void, status?: string) {
+  if (!tuiState.agentLogs[agentName]) tuiState.agentLogs[agentName] = [];
+  if (!tuiState.liveLogIndexes) tuiState.liveLogIndexes = {};
+  const liveKey = `${agentName}:${key}`;
+  const existing = tuiState.liveLogIndexes[liveKey];
+  if (existing && tuiState.thoughtsLog[existing.global] !== undefined && tuiState.agentLogs[agentName][existing.agent] !== undefined) {
+    tuiState.thoughtsLog[existing.global] = logStr;
+    tuiState.agentLogs[agentName][existing.agent] = logStr;
+  } else {
+    tuiState.thoughtsLog.push(logStr);
+    tuiState.agentLogs[agentName].push(logStr);
+    tuiState.liveLogIndexes[liveKey] = {
+      global: tuiState.thoughtsLog.length - 1,
+      agent: tuiState.agentLogs[agentName].length - 1
+    };
+  }
+  if (status) tuiState.currentStatus = status;
+  triggerRender?.();
+}
+
+function clearTuiLiveLog(tuiState: TuiState, agentName: string, key: string) {
+  delete tuiState.liveLogIndexes?.[`${agentName}:${key}`];
+}
+
 function handleAgentEventForTui(tuiState: TuiState | undefined, agentName: string, ev: any, triggerRender?: () => void) {
   if (!tuiState) return;
 
   if (ev.type === "thinking" && ev.text) {
-    appendTuiEventLog(tuiState, agentName, `\x1b[2m[Thinking] ${ev.text}\x1b[0m`, triggerRender, "Thinking...");
+    updateTuiLiveLog(tuiState, agentName, "thinking", `\x1b[2m[Thinking] ${ev.text}\x1b[0m`, triggerRender, "Thinking...");
     return;
   }
   if (ev.type === "tool_call" && ev.toolCall) {
-    appendTuiEventLog(tuiState, agentName, `\x1b[33m[Tool Call] ${ev.toolCall.name}(${stringifyToolPayload(ev.toolCall.input)})\x1b[0m`, triggerRender, `Calling tool: ${ev.toolCall.name}`);
+    clearTuiLiveLog(tuiState, agentName, "thinking");
+    appendTuiEventLog(tuiState, agentName, `\x1b[33m[Tool Call] ${ev.toolCall.name}(${stringifyToolPayload(ev.toolCall.input)})\x1b[0m`, triggerRender, `Calling tool: ${ev.toolCall.name}`, true);
     return;
   }
   if (ev.type === "tool_result" && ev.toolCall) {
-    appendTuiEventLog(tuiState, agentName, `\x1b[32m[Tool Result] ${ev.toolCall.name} -> ${stringifyToolPayload(ev.result, 500)}\x1b[0m`, triggerRender);
+    appendTuiEventLog(tuiState, agentName, `\x1b[32m[Tool Result] ${ev.toolCall.name} -> ${stringifyToolPayload(ev.result, 500)}\x1b[0m`, triggerRender, undefined, true);
     return;
   }
   if (ev.type === "tool_execution_start") {
     const name = ev.toolName || "tool";
-    appendTuiEventLog(tuiState, agentName, `\x1b[33m[Tool Start] ${name}(${stringifyToolPayload(ev.args)})\x1b[0m`, triggerRender, `Calling tool: ${name}`);
+    clearTuiLiveLog(tuiState, agentName, "thinking");
+    clearTuiLiveLog(tuiState, agentName, "response");
+    appendTuiEventLog(tuiState, agentName, `\x1b[33m[Tool Start] ${name}(${stringifyToolPayload(ev.args)})\x1b[0m`, triggerRender, `Calling tool: ${name}`, true);
     return;
   }
   if (ev.type === "tool_execution_update") {
     const name = ev.toolName || "tool";
-    appendTuiEventLog(tuiState, agentName, `\x1b[33m[Tool Update] ${name}: ${stringifyToolPayload(ev.update ?? ev.result ?? ev, 500)}\x1b[0m`, triggerRender, `Running tool: ${name}`);
+    updateTuiLiveLog(tuiState, agentName, `tool:${name}:update`, `\x1b[33m[Tool Update] ${name}: ${stringifyToolPayload(ev.update ?? ev.result ?? ev, 500)}\x1b[0m`, triggerRender, `Running tool: ${name}`);
     return;
   }
   if (ev.type === "tool_execution_end") {
     const name = ev.toolName || "tool";
     const isError = ev.result?.isError === true || ev.isError === true;
     const prefix = isError ? "\x1b[31m[Tool Error]" : "\x1b[32m[Tool End]";
-    appendTuiEventLog(tuiState, agentName, `${prefix} ${name} -> ${stringifyToolPayload(ev.result, 700)}\x1b[0m`, triggerRender);
+    clearTuiLiveLog(tuiState, agentName, `tool:${name}:update`);
+    appendTuiEventLog(tuiState, agentName, `${prefix} ${name} -> ${stringifyToolPayload(ev.result, 700)}\x1b[0m`, triggerRender, undefined, true);
     return;
   }
   if (ev.type === "tool_result_end") {
     const msg = ev.message;
     const content = Array.isArray(msg?.content) ? msg.content.map((c: any) => c?.text || JSON.stringify(c)).join("\n") : msg?.content;
-    appendTuiEventLog(tuiState, agentName, `\x1b[32m[Tool Result] ${stringifyToolPayload(content, 700)}\x1b[0m`, triggerRender);
+    appendTuiEventLog(tuiState, agentName, `\x1b[32m[Tool Result] ${stringifyToolPayload(content, 700)}\x1b[0m`, triggerRender, undefined, true);
     return;
   }
 
@@ -617,15 +654,30 @@ function handleAgentEventForTui(tuiState: TuiState | undefined, agentName: strin
     if (part?.type === "thinking") {
       const summaries = Array.isArray(part.summary) ? part.summary.map((s: any) => s?.text).filter(Boolean).join("\n") : "";
       const text = part.text || part.thinking || summaries;
-      if (text?.trim()) appendTuiEventLog(tuiState, agentName, `\x1b[2m[Thinking] ${stringifyToolPayload(text, 900)}\x1b[0m`, triggerRender, "Thinking...");
+      if (text?.trim()) {
+        const line = `\x1b[2m[Thinking] ${stringifyToolPayload(text, 900)}\x1b[0m`;
+        if (ev.type === "message_update") updateTuiLiveLog(tuiState, agentName, "thinking", line, triggerRender, "Thinking...");
+        else {
+          updateTuiLiveLog(tuiState, agentName, "thinking", line, triggerRender, "Thinking...");
+          clearTuiLiveLog(tuiState, agentName, "thinking");
+        }
+      }
     } else if ((part?.type === "toolCall" || part?.toolCall) && ev.type !== "message_update") {
       const call = part.toolCall ?? part;
       const name = call.name || call.toolName || "tool";
       const args = call.arguments ?? call.input;
-      appendTuiEventLog(tuiState, agentName, `\x1b[33m[Tool Call] ${name}(${stringifyToolPayload(args)})\x1b[0m`, triggerRender, `Calling tool: ${name}`);
-    } else if (part?.type === "text" && ev.type === "message_update") {
+      clearTuiLiveLog(tuiState, agentName, "thinking");
+      appendTuiEventLog(tuiState, agentName, `\x1b[33m[Tool Call] ${name}(${stringifyToolPayload(args)})\x1b[0m`, triggerRender, `Calling tool: ${name}`, true);
+    } else if (part?.type === "text") {
       const text = part.text || "";
-      if (text.trim()) appendTuiEventLog(tuiState, agentName, `\x1b[36m[Response] ${stringifyToolPayload(text, 1000)}\x1b[0m`, triggerRender, "Responding...");
+      if (text.trim()) {
+        const line = `\x1b[36m[Response] ${stringifyToolPayload(text, 1000)}\x1b[0m`;
+        if (ev.type === "message_update") updateTuiLiveLog(tuiState, agentName, "response", line, triggerRender, "Responding...");
+        else {
+          updateTuiLiveLog(tuiState, agentName, "response", line, triggerRender, "Responding...");
+          clearTuiLiveLog(tuiState, agentName, "response");
+        }
+      }
     }
   }
 
@@ -635,11 +687,11 @@ function handleAgentEventForTui(tuiState: TuiState | undefined, agentName: strin
     const name = result.toolName || result.name || "tool";
     const content = Array.isArray(result.content) ? result.content.map((c: any) => c?.text || JSON.stringify(c)).join("\n") : result.content;
     const prefix = result.isError ? "\x1b[31m[Tool Error]" : "\x1b[32m[Tool Result]";
-    appendTuiEventLog(tuiState, agentName, `${prefix} ${name} -> ${stringifyToolPayload(content, 500)}\x1b[0m`, triggerRender);
+    appendTuiEventLog(tuiState, agentName, `${prefix} ${name} -> ${stringifyToolPayload(content, 500)}\x1b[0m`, triggerRender, undefined, true);
   }
 
   if (msg.stopReason === "error" || msg.errorMessage) {
-    appendTuiEventLog(tuiState, agentName, `\x1b[31m[Provider Error] ${msg.errorMessage || "Provider returned an error"}\x1b[0m`, triggerRender, "Provider error");
+    appendTuiEventLog(tuiState, agentName, `\x1b[31m[Provider Error] ${msg.errorMessage || "Provider returned an error"}\x1b[0m`, triggerRender, "Provider error", true);
   }
 }
 
