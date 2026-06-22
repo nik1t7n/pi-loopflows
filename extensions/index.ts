@@ -96,6 +96,48 @@ type RunContext = {
   params: Record<string, any>;
 };
 
+type RunState = "running" | "pausing" | "paused" | "resuming" | "terminating" | "terminated" | "failed" | "completed";
+
+type ResumeCursor = {
+  workflowIndex: number;
+  loopId?: string;
+  loopIteration?: number;
+  loopBodyIndex?: number;
+};
+
+type ActiveRun = {
+  id: string;
+  workflow: WorkflowDef;
+  task: string;
+  cwd: string;
+  scope: "user" | "project" | "both";
+  state: RunState;
+  ctx: RunContext;
+  maxIterations?: number;
+  extensionCtx?: any;
+  tuiState?: TuiState;
+  triggerRender?: () => void;
+  currentProc?: ReturnType<typeof spawn>;
+  currentAgent?: string;
+  currentStep?: string;
+  checkpoint?: ResumeCursor;
+  terminalReason?: string;
+};
+
+class LoopflowPauseError extends Error {
+  constructor(message = "Loopflow paused") {
+    super(message);
+    this.name = "LoopflowPauseError";
+  }
+}
+
+class LoopflowTerminateError extends Error {
+  constructor(message = "Loopflow terminated") {
+    super(message);
+    this.name = "LoopflowTerminateError";
+  }
+}
+
 type TuiState = {
   workflowName: string;
   task: string;
@@ -172,14 +214,16 @@ class LoopflowWidget implements Component {
 class LoopflowOverlay implements Component {
   private state: TuiState;
   private onClose: () => void;
+  private extensionCtx?: any;
   private selectedAgentIndex: number = 0;
   private scrollTop: number = 0;
   private autoFollow: boolean = true;
   private lastDownAt: number = 0;
   
-  constructor(state: TuiState, onClose: () => void) {
+  constructor(state: TuiState, onClose: () => void, extensionCtx?: any) {
     this.state = state;
     this.onClose = onClose;
+    this.extensionCtx = extensionCtx;
   }
 
   private ansiWordWrap(text: string, maxWidth: number): string[] {
@@ -361,7 +405,7 @@ class LoopflowOverlay implements Component {
     } else if (this.state.selectedAgent === null) {
       footerText = "Press [↑/↓] Navigate | [←] Map | [Enter] Select | [Esc/q] Close";
     } else {
-      footerText = "[↑] pause+scroll | [↓] scroll | double [↓] bottom+follow | [←/b/Esc] Back";
+      footerText = "[↑] pause+scroll | double [↓] bottom | [p] pause [r] resume [x] terminate [m] msg";
     }
     lines.push(`│ \x1b[2m${footerText}\x1b[0m` + " ".repeat(Math.max(0, width - 4 - footerText.length)) + " │");
     lines.push(`└${border}┘`);
@@ -378,6 +422,23 @@ class LoopflowOverlay implements Component {
       }
     } else if (matchesKey(data, "q")) {
       this.onClose();
+    } else if (matchesKey(data, "p")) {
+      const ok = requestPauseActiveRun("Paused from loopflow overlay");
+      this.extensionCtx?.ui?.notify?.(ok ? "Loopflow pause requested." : "No running loopflow to pause.", ok ? "info" : "error");
+    } else if (matchesKey(data, "r")) {
+      void resumePausedRun(this.extensionCtx);
+    } else if (matchesKey(data, "x")) {
+      const ok = requestTerminateActiveRun("Terminated from loopflow overlay");
+      this.extensionCtx?.ui?.notify?.(ok ? "Loopflow terminate requested." : "No active loopflow to terminate.", ok ? "warning" : "error");
+    } else if (matchesKey(data, "m")) {
+      const agent = this.state.selectedAgent && this.state.selectedAgent !== "global" ? this.state.selectedAgent : (this.state.activeAgent || "worker");
+      void (async () => {
+        const text = await this.extensionCtx?.ui?.input?.(`Message ${agent}:`, "tweak/instruction");
+        if (text?.trim()) {
+          const ok = queueAgentMessage(agent, text.trim(), "overlay");
+          this.extensionCtx?.ui?.notify?.(ok ? `Queued message for ${agent}` : "No active/paused loopflow.", ok ? "info" : "error");
+        }
+      })();
     } else if (matchesKey(data, "b")) {
       if (this.state.viewMode === "thoughts" && this.state.selectedAgent !== null) {
         this.state.selectedAgent = null;
@@ -825,6 +886,7 @@ class PiSubprocessAdapter implements ExecutorAdapter {
     
     const exitCode = await new Promise<number>((resolve) => {
       const proc = spawn(invocation.command, invocation.args, { cwd: options.cwd, stdio: ["ignore", "pipe", "pipe"] });
+      if (activeRun) activeRun.currentProc = proc;
       
       let buffer = "";
       const processLine = (rawLine: string) => {
@@ -864,9 +926,16 @@ class PiSubprocessAdapter implements ExecutorAdapter {
       proc.stderr.on("data", (d) => { stderr += d.toString(); });
       proc.on("close", (code) => {
         if (buffer.trim()) processLine(buffer);
-        resolve(code ?? 0);
+        if (activeRun?.currentProc === proc) activeRun.currentProc = undefined;
+        if (activeRun?.state === "pausing") resolve(-20);
+        else if (activeRun?.state === "terminating") resolve(-21);
+        else resolve(code ?? 0);
       });
-      proc.on("error", (err) => { stderr += String(err?.message ?? err); resolve(1); });
+      proc.on("error", (err) => {
+        if (activeRun?.currentProc === proc) activeRun.currentProc = undefined;
+        stderr += String(err?.message ?? err);
+        resolve(activeRun?.state === "terminating" ? -21 : activeRun?.state === "pausing" ? -20 : 1);
+      });
       if (options.signal) {
         const kill = () => { proc.kill("SIGTERM"); setTimeout(() => proc.kill("SIGKILL"), 3000); };
         if (options.signal.aborted) kill();
@@ -1033,13 +1102,27 @@ async function runStep(def: StepDef, ctx: RunContext, adapter: ExecutorAdapter, 
     }
   }
 
+  const messageBag = (ctx.params.agentMessages ?? {}) as Record<string, Array<{ message: string; source: string; ts: string }>>;
+  ctx.params.agentMessages = messageBag;
+  const pendingMessages = messageBag[def.agent] ?? [];
+  if (pendingMessages.length > 0) {
+    task += `\n\n=== Live user messages for agent '${def.agent}' ===\n${pendingMessages.map((m, i) => `${i + 1}. [${m.ts}] (${m.source}) ${m.message}`).join("\n")}\n\nTreat these as current high-priority user instructions. If they conflict with safety, validation, or the workflow contract, report the conflict explicitly.`;
+    messageBag[def.agent] = [];
+  }
+
   // Auto-inject agentmemory context (CLI-first via API)
   const memoryContext = await queryAgentMemory(task, ctx.cwd);
   if (memoryContext) {
     task = memoryContext + task;
   }
 
+  if (activeRun) {
+    activeRun.currentAgent = def.agent;
+    activeRun.currentStep = def.id;
+  }
   const run = await adapter.runAgent(def.agent, task, { cwd: ctx.cwd, signal, model: def.model, tools: def.tools, scope, onAgentEvent });
+  if (run.exitCode === -20) throw new LoopflowPauseError(`Paused before completing step '${def.id}' (${def.agent}).`);
+  if (run.exitCode === -21) throw new LoopflowTerminateError(`Terminated during step '${def.id}' (${def.agent}).`);
   const json = def.gate ? extractJson(run.output) : undefined;
   const status = json?.status;
   const artifactName = def.output ? renderTemplate(def.output, ctx, iteration) : `${safeName(def.id)}${iteration ? `-${iteration}` : ""}.${def.gate ? "json" : "md"}`;
@@ -1266,11 +1349,12 @@ Compress and reflect on these observations strictly matching the specified forma
   await saveArtifact(ctx, `om-debug-${currentIteration}.txt`, debugLines.join("\n"));
 }
 
-async function runLoop(loop: LoopDef, ctx: RunContext, adapter: ExecutorAdapter, scope: "user" | "project" | "both", signal: AbortSignal | undefined, tuiState?: TuiState, triggerRender?: () => void): Promise<StepResult> {
+async function runLoop(loop: LoopDef, ctx: RunContext, adapter: ExecutorAdapter, scope: "user" | "project" | "both", signal: AbortSignal | undefined, tuiState?: TuiState, triggerRender?: () => void, workflowIndex = 0, resume?: ResumeCursor): Promise<StepResult> {
   await saveArtifact(ctx, `loop-debug.json`, JSON.stringify(loop, null, 2));
   const max = Math.max(1, loop.maxIterations);
   let lastGate: StepResult | undefined;
-  for (let i = 1; i <= max; i++) {
+  const startIteration = resume?.loopId === loop.id && resume.loopIteration ? resume.loopIteration : 1;
+  for (let i = startIteration; i <= max; i++) {
     // Run Observational Memory compression by default (unless explicitly set to false)
     const isObservational = loop.memory?.observational !== false;
     if (i > 1 && isObservational) {
@@ -1278,7 +1362,14 @@ async function runLoop(loop: LoopDef, ctx: RunContext, adapter: ExecutorAdapter,
     }
 
     await saveArtifact(ctx, `${safeName(loop.id)}/iteration-${i}.txt`, `Starting iteration ${i}/${max}\n`);
-    for (const step of loop.body) {
+    const startBodyIndex = resume?.loopId === loop.id && resume.loopIteration === i ? (resume.loopBodyIndex ?? 0) : 0;
+    for (let stepIndex = startBodyIndex; stepIndex < loop.body.length; stepIndex++) {
+      const step = loop.body[stepIndex];
+      if (activeRun) {
+        await saveCheckpoint(activeRun, { workflowIndex, loopId: loop.id, loopIteration: i, loopBodyIndex: stepIndex });
+        if (activeRun.state === "paused" || activeRun.state === "pausing") throw new LoopflowPauseError(`Paused before step '${step.id}' (${step.agent}).`);
+        if (activeRun.state === "terminated" || activeRun.state === "terminating") throw new LoopflowTerminateError(`Terminated before step '${step.id}' (${step.agent}).`);
+      }
       if (tuiState) {
         tuiState.activeStep = step.id;
         tuiState.activeAgent = step.agent;
@@ -1329,13 +1420,104 @@ ${lastGate?.stderr ? `\nStderr:\n${truncateForError(lastGate.stderr)}` : ""}`);
 let activeTuiState: TuiState | undefined = undefined;
 let activeUiHandle: any = undefined;
 let activeExtensionCtx: any = undefined;
+let activeRun: ActiveRun | undefined = undefined;
+let pausedRun: ActiveRun | undefined = undefined;
 
-async function runWorkflow(workflow: WorkflowDef, task: string, opts: { cwd: string; signal?: AbortSignal; params?: Record<string, any>; maxIterations?: number; extensionCtx?: any }) {
+function activeRunStatus(): string {
+  if (activeRun) return `${activeRun.workflow.name} [${activeRun.state}] step=${activeRun.currentStep || "none"} agent=${activeRun.currentAgent || "none"}`;
+  if (pausedRun) return `${pausedRun.workflow.name} [paused] step=${pausedRun.currentStep || "none"} agent=${pausedRun.currentAgent || "none"}`;
+  return "No active or paused loopflow.";
+}
+
+function setRunState(run: ActiveRun | undefined, state: RunState, status?: string) {
+  if (!run) return;
+  run.state = state;
+  if (run.tuiState) {
+    run.tuiState.currentStatus = status ?? state;
+    run.triggerRender?.();
+  }
+}
+
+async function saveCheckpoint(run: ActiveRun, cursor: ResumeCursor) {
+  run.checkpoint = cursor;
+  const checkpoint = {
+    id: run.id,
+    workflow: run.workflow.name,
+    task: run.task,
+    cwd: run.cwd,
+    state: run.state,
+    cursor,
+    params: run.ctx.params,
+    outputs: run.ctx.outputs,
+    sequence: run.ctx.sequence,
+    artifactsDir: run.ctx.artifactsDir,
+    currentAgent: run.currentAgent,
+    currentStep: run.currentStep,
+    savedAt: new Date().toISOString()
+  };
+  await saveArtifact(run.ctx, "checkpoint.json", JSON.stringify(checkpoint, null, 2));
+}
+
+function requestPauseActiveRun(reason = "User requested pause") {
+  if (!activeRun) return false;
+  if (activeRun.state !== "running" && activeRun.state !== "resuming") return false;
+  activeRun.terminalReason = reason;
+  if (!activeRun.currentProc) {
+    setRunState(activeRun, "paused", "Paused at checkpoint.");
+    pausedRun = activeRun;
+    void saveCheckpoint(activeRun, activeRun.checkpoint ?? { workflowIndex: 0 }).catch(() => {});
+    return true;
+  }
+  setRunState(activeRun, "pausing", "Pausing after interrupt...");
+  activeRun.currentProc.kill("SIGINT");
+  setTimeout(() => {
+    if (activeRun?.state === "pausing") activeRun.currentProc?.kill("SIGTERM");
+  }, 3000).unref?.();
+  return true;
+}
+
+function requestTerminateActiveRun(reason = "User requested terminate") {
+  const run = activeRun ?? pausedRun;
+  if (!run) return false;
+  run.terminalReason = reason;
+  setRunState(run, "terminating", "Terminating...");
+  run.currentProc?.kill("SIGTERM");
+  setTimeout(() => {
+    if (run.state === "terminating") run.currentProc?.kill("SIGKILL");
+  }, 3000).unref?.();
+  if (!run.currentProc) {
+    setRunState(run, "terminated", "Terminated.");
+    if (pausedRun === run) pausedRun = undefined;
+    if (activeRun === run) activeRun = undefined;
+    if (activeTuiState === run.tuiState) activeTuiState = undefined;
+  }
+  return true;
+}
+
+function queueAgentMessage(agent: string, message: string, source = "user") {
+  const run = activeRun ?? pausedRun;
+  if (!run) return false;
+  const key = "agentMessages";
+  const bag = (run.ctx.params[key] ?? {}) as Record<string, Array<{ message: string; source: string; ts: string }>>;
+  if (!Array.isArray(bag[agent])) bag[agent] = [];
+  bag[agent].push({ message, source, ts: new Date().toISOString() });
+  run.ctx.params[key] = bag;
+  if (run.tuiState) {
+    appendTuiEventLog(run.tuiState, agent, `\x1b[35m[User Message queued] ${message}\x1b[0m`, run.triggerRender, `Queued message for ${agent}`);
+  }
+  void saveCheckpoint(run, run.checkpoint ?? { workflowIndex: 0 }).catch(() => {});
+  return true;
+}
+
+async function runWorkflow(workflow: WorkflowDef, task: string, opts: { cwd: string; signal?: AbortSignal; params?: Record<string, any>; maxIterations?: number; extensionCtx?: any; resumeRun?: ActiveRun }) {
+  if (activeRun && activeRun !== opts.resumeRun) {
+    throw new Error(`Another loopflow is already active: ${activeRunStatus()}`);
+  }
   const adapter = new PiSubprocessAdapter();
-  const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${safeName(workflow.name)}`;
-  const artifactsDir = path.join(opts.cwd, ".pi/loopflows/runs", runId);
+  const runId = opts.resumeRun?.id ?? `${new Date().toISOString().replace(/[:.]/g, "-")}-${safeName(workflow.name)}`;
+  const artifactsDir = opts.resumeRun?.ctx.artifactsDir ?? path.join(opts.cwd, ".pi/loopflows/runs", runId);
   await ensureDir(artifactsDir);
-  const ctx: RunContext = { cwd: opts.cwd, task, artifactsDir, outputs: {}, sequence: [], params: opts.params ?? {} };
+  const ctx: RunContext = opts.resumeRun?.ctx ?? { cwd: opts.cwd, task, artifactsDir, outputs: {}, sequence: [], params: opts.params ?? {} };
   const scope = workflow.defaults?.agentScope ?? "both";
 
   await saveArtifact(ctx, "workflow.json", JSON.stringify(workflow, null, 2));
@@ -1357,6 +1539,26 @@ async function runWorkflow(workflow: WorkflowDef, task: string, opts: { cwd: str
 
   activeTuiState = tuiState;
   activeExtensionCtx = opts.extensionCtx;
+  const run: ActiveRun = opts.resumeRun ?? {
+    id: runId,
+    workflow,
+    task,
+    cwd: opts.cwd,
+    scope,
+    state: "running",
+    ctx,
+    maxIterations: opts.maxIterations,
+    extensionCtx: opts.extensionCtx,
+    tuiState,
+  };
+  run.workflow = workflow;
+  run.task = task;
+  run.cwd = opts.cwd;
+  run.scope = scope;
+  run.state = opts.resumeRun ? "resuming" : "running";
+  run.extensionCtx = opts.extensionCtx;
+  run.tuiState = tuiState;
+  activeRun = run;
 
   let uiHandle: any = undefined;
   const updateWidget = () => {
@@ -1375,6 +1577,7 @@ async function runWorkflow(workflow: WorkflowDef, task: string, opts: { cwd: str
     activeUiHandle?.requestRender?.();
     updateWidget();
   };
+  run.triggerRender = triggerRender;
 
   if (opts.extensionCtx && tuiState) {
     try {
@@ -1384,7 +1587,7 @@ async function runWorkflow(workflow: WorkflowDef, task: string, opts: { cwd: str
           done();
           uiHandle = undefined;
           activeUiHandle = undefined;
-        });
+        }, opts.extensionCtx);
       }, {
         overlay: true,
         overlayOptions: {
@@ -1402,13 +1605,27 @@ async function runWorkflow(workflow: WorkflowDef, task: string, opts: { cwd: str
     }
   }
 
-  for (const node of workflow.steps) {
+  const resumeCursor = opts.resumeRun?.checkpoint;
+  const startWorkflowIndex = resumeCursor?.workflowIndex ?? 0;
+  try {
+  for (let workflowIndex = startWorkflowIndex; workflowIndex < workflow.steps.length; workflowIndex++) {
+    const node = workflow.steps[workflowIndex];
+    if (activeRun) {
+      await saveCheckpoint(activeRun, { workflowIndex });
+      if (activeRun.state === "paused" || activeRun.state === "pausing") throw new LoopflowPauseError("Paused at workflow checkpoint.");
+      if (activeRun.state === "terminated" || activeRun.state === "terminating") throw new LoopflowTerminateError("Terminated at workflow checkpoint.");
+    }
     if ("loop" in node) {
       const loop = { ...node.loop };
       if (opts.maxIterations) loop.maxIterations = opts.maxIterations;
-      const result = await runLoop(loop, ctx, adapter, scope, opts.signal, tuiState, triggerRender);
+      const result = await runLoop(loop, ctx, adapter, scope, opts.signal, tuiState, triggerRender, workflowIndex, resumeCursor);
       if (result.exitCode !== 0 || String(result.status ?? "").startsWith("exhausted") || statusIn(result.status, loop.stopStatuses, ["blocked"])) break;
     } else {
+      if (activeRun) {
+        await saveCheckpoint(activeRun, { workflowIndex });
+        if (activeRun.state === "paused" || activeRun.state === "pausing") throw new LoopflowPauseError("Paused at workflow checkpoint.");
+        if (activeRun.state === "terminated" || activeRun.state === "terminating") throw new LoopflowTerminateError("Terminated at workflow checkpoint.");
+      }
       if (tuiState) {
         tuiState.activeStep = node.id;
         tuiState.activeAgent = node.agent;
@@ -1450,6 +1667,29 @@ ${result.stderr ? `\nStderr:\n${truncateForError(result.stderr)}` : ""}`);
       }
     }
   }
+  } catch (err: any) {
+    if (err instanceof LoopflowPauseError) {
+      if (activeRun) {
+        setRunState(activeRun, "paused", err.message);
+        pausedRun = activeRun;
+        await saveCheckpoint(activeRun, activeRun.checkpoint ?? { workflowIndex: startWorkflowIndex });
+      }
+      opts.extensionCtx?.ui?.notify?.(`Loopflow paused: ${err.message}`, "info");
+      throw err;
+    }
+    if (err instanceof LoopflowTerminateError) {
+      if (activeRun) {
+        setRunState(activeRun, "terminated", err.message);
+        await saveArtifact(activeRun.ctx, "terminated.txt", `${new Date().toISOString()} ${err.message}\n${activeRun.terminalReason ?? ""}`);
+      }
+      pausedRun = undefined;
+      throw err;
+    }
+    if (activeRun) setRunState(activeRun, "failed", err?.message || String(err));
+    throw err;
+  }
+
+  if (activeRun) setRunState(activeRun, "completed", "Completed.");
 
   if (opts.extensionCtx) {
     try {
@@ -1463,6 +1703,7 @@ ${result.stderr ? `\nStderr:\n${truncateForError(result.stderr)}` : ""}`);
 
   activeTuiState = undefined;
   activeUiHandle = undefined;
+  if (activeRun?.id === run.id) activeRun = undefined;
 
   const summary = [
     `# Loopflow run: ${workflow.name}`,
@@ -1475,6 +1716,44 @@ ${result.stderr ? `\nStderr:\n${truncateForError(result.stderr)}` : ""}`);
   ].join("\n");
   const summaryPath = await saveArtifact(ctx, "summary.md", summary);
   return { artifactsDir, summaryPath, results: ctx.sequence, summary };
+}
+
+async function resumePausedRun(extensionCtx?: any, pi?: ExtensionAPI) {
+  if (!pausedRun) {
+    extensionCtx?.ui?.notify?.("No paused loopflow to resume.", "error");
+    return false;
+  }
+  if (activeRun && activeRun !== pausedRun) {
+    extensionCtx?.ui?.notify?.("Another loopflow is already running.", "error");
+    return false;
+  }
+  const run = pausedRun;
+  pausedRun = undefined;
+  run.extensionCtx = extensionCtx ?? run.extensionCtx;
+  setRunState(run, "resuming", "Resuming from checkpoint...");
+  activeRun = run;
+  runWorkflow(run.workflow, run.task, {
+    cwd: run.cwd,
+    params: run.ctx.params,
+    maxIterations: run.maxIterations,
+    extensionCtx: run.extensionCtx,
+    resumeRun: run,
+  }).then((result) => {
+    run.extensionCtx?.ui?.notify?.("Loopflow resumed and completed.", "info");
+    pi?.sendMessage?.({ customType: "loopflow-result", content: result.summary, display: true, details: result }, { triggerTurn: false });
+  }).catch((err) => {
+    if (err instanceof LoopflowPauseError) {
+      run.extensionCtx?.ui?.notify?.("Loopflow paused again.", "info");
+      return;
+    }
+    if (err instanceof LoopflowTerminateError) {
+      run.extensionCtx?.ui?.notify?.("Loopflow terminated.", "warning");
+      return;
+    }
+    run.extensionCtx?.ui?.notify?.(`Resumed loopflow failed: ${err?.message || err}`, "error");
+  });
+  extensionCtx?.ui?.notify?.("Loopflow resume started.", "info");
+  return true;
 }
 
 const RunParams = Type.Object({
@@ -1514,8 +1793,18 @@ export default function (pi: ExtensionAPI) {
         return { content: [{ type: "text", text: `Unknown loopflow ${params.workflow}. Available: ${[...workflows.keys()].join(", ") || "none"}` }], details: {}, isError: true };
       }
       onUpdate?.({ content: [{ type: "text", text: `Running loopflow ${params.workflow}...` }], details: {} });
-      const result = await runWorkflow(found.workflow, params.task, { cwd: ctx.cwd, signal, params: params.params, maxIterations: params.maxIterations, extensionCtx: ctx });
-      return { content: [{ type: "text", text: result.summary }], details: result };
+      try {
+        const result = await runWorkflow(found.workflow, params.task, { cwd: ctx.cwd, signal, params: params.params, maxIterations: params.maxIterations, extensionCtx: ctx });
+        return { content: [{ type: "text", text: result.summary }], details: result };
+      } catch (err: any) {
+        if (err instanceof LoopflowPauseError) {
+          return { content: [{ type: "text", text: `Loopflow paused. Use /loopflow-resume to continue. Artifacts: ${pausedRun?.ctx.artifactsDir ?? "unknown"}` }], details: { paused: true, artifactsDir: pausedRun?.ctx.artifactsDir } };
+        }
+        if (err instanceof LoopflowTerminateError) {
+          return { content: [{ type: "text", text: `Loopflow terminated.` }], details: { terminated: true }, isError: true };
+        }
+        throw err;
+      }
     },
   });
 
@@ -1525,6 +1814,51 @@ export default function (pi: ExtensionAPI) {
       const workflows = discoverWorkflows(ctx.cwd);
       const lines = [...workflows.values()].map(({ file, workflow }) => `- ${workflow.name}: ${workflow.description ?? ""}\n  ${file}`);
       ctx.ui.notify(lines.length ? lines.join("\n") : "No loopflows found", "info");
+    },
+  });
+
+  pi.registerCommand("loopflow-status", {
+    description: "Show active/paused loopflow status",
+    handler: async (_args, ctx) => {
+      ctx.ui.notify(activeRunStatus(), "info");
+    },
+  });
+
+  pi.registerCommand("loopflow-pause", {
+    description: "Pause the active loopflow at the current checkpoint",
+    handler: async (_args, ctx) => {
+      const ok = requestPauseActiveRun("Paused from /loopflow-pause");
+      ctx.ui.notify(ok ? "Loopflow pause requested." : "No running loopflow to pause.", ok ? "info" : "error");
+    },
+  });
+
+  pi.registerCommand("loopflow-resume", {
+    description: "Resume the paused loopflow",
+    handler: async (_args, ctx) => {
+      await resumePausedRun(ctx, pi);
+    },
+  });
+
+  pi.registerCommand("loopflow-terminate", {
+    description: "Terminate the active or paused loopflow permanently",
+    handler: async (_args, ctx) => {
+      const ok = requestTerminateActiveRun("Terminated from /loopflow-terminate");
+      ctx.ui.notify(ok ? "Loopflow terminate requested." : "No active or paused loopflow to terminate.", ok ? "warning" : "error");
+    },
+  });
+
+  pi.registerCommand("loopflow-message", {
+    description: "Queue a live instruction for a loopflow agent: /loopflow-message <agent> -- <text>",
+    handler: async (args, ctx) => {
+      const [agentPart, ...rest] = args.split(/\s+--\s+/);
+      const agent = agentPart.trim().split(/\s+/)[0];
+      const message = rest.join(" -- ").trim() || agentPart.trim().replace(/^\S+\s*/, "");
+      if (!agent || !message) {
+        ctx.ui.notify("Usage: /loopflow-message <agent> -- <message>", "error");
+        return;
+      }
+      const ok = queueAgentMessage(agent, message, "slash");
+      ctx.ui.notify(ok ? `Queued message for ${agent}. Pause/resume if you need the active agent to consume it immediately.` : "No active or paused loopflow.", ok ? "info" : "error");
     },
   });
 
@@ -1545,7 +1879,7 @@ export default function (pi: ExtensionAPI) {
           return new LoopflowOverlay(activeTuiState!, () => {
             done();
             activeUiHandle = undefined;
-          });
+          }, ctx);
         }, {
           overlay: true,
           overlayOptions: {
@@ -1595,6 +1929,14 @@ export default function (pi: ExtensionAPI) {
           pi.sendMessage({ customType: "loopflow-result", content: result.summary, display: true, details: result }, { triggerTurn: false });
         })
         .catch((err) => {
+          if (err instanceof LoopflowPauseError) {
+            ctx.ui.notify(`Loopflow '${name}' paused. Use /loopflow-resume to continue.`, "info");
+            return;
+          }
+          if (err instanceof LoopflowTerminateError) {
+            ctx.ui.notify(`Loopflow '${name}' terminated.`, "warning");
+            return;
+          }
           ctx.ui.notify(`Loopflow '${name}' failed: ${err?.message || err}`, "error");
         });
     },
