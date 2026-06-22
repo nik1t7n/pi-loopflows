@@ -1,0 +1,56 @@
+{
+  "name": "pi-loopflows",
+  "version": "0.1.0",
+  "description": "Deterministic loop workflows for Pi subagents: steps, gates, feedback loops, and artifacts.",
+  "license": "MIT",
+  "author": "Nikita Nosov <20nik.nosov21@gmail.com>",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "agent-workflows",
+    "subagents",
+    "loopflows",
+    "ai-agents"
+  ],
+  "homepage": "https://github.com/nik1t7n/pi-loopflows#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nik1t7n/pi-loopflows.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nik1t7n/pi-loopflows/issues"
+  },
+  "files": [
+    "extensions",
+    "loopflows",
+    "skills",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ],
+    "image": "https://raw.githubusercontent.com/nik1t7n/pi-loopflows/main/assets/pi-loopflows.png"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "latest",
+    "@types/node": "^26.0.0",
+    "typebox": "latest",
+    "typescript": "latest"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "pack:check": "npm pack --dry-run"
+  }
+}

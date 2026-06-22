@@ -1,0 +1,65 @@
+{
+  "name": "launch-control",
+  "version": "1.0.0",
+  "description": "Plan-as-contract implementation loopflow: context, block plan, builder/reviewer feedback loop, and final audit with real validation evidence.",
+  "backend": "pi-subprocess",
+  "defaults": {
+    "agentScope": "both"
+  },
+  "steps": [
+    {
+      "id": "context",
+      "agent": "context-builder",
+      "output": "context.md",
+      "task": "Build concise launch-control execution context for this task:\n\n{task}\n\nRead any provided plan/spec path, inspect the repository enough to identify relevant files, acceptance criteria, validation commands, risks, missing inputs, and stop conditions. Do not edit files. Return compact handoff context with: scope, likely files, validation contract candidates, explicit unknowns, and stop conditions."
+    },
+    {
+      "id": "plan",
+      "agent": "planner",
+      "output": "block-plan.md",
+      "task": "Create the smallest safe launch-control implementation block from this context:\n\n{outputs.context}\n\nOriginal task:\n{task}\n\nReturn a concrete block plan with: intended slice, acceptance criteria, files likely involved, real validation commands/evidence required, non-goals, stop conditions, and what the builder must report. Keep the plan lean and executable. Do not edit files."
+    },
+    {
+      "loop": {
+        "id": "build-review",
+        "maxIterations": 3,
+        "gateStep": "review",
+        "passStatuses": ["approved"],
+        "retryStatuses": ["changes_requested"],
+        "stopStatuses": ["blocked"],
+        "onExhausted": "stop",
+        "body": [
+          {
+            "id": "build",
+            "agent": "worker",
+            "output": "build-{loop.iteration}.md",
+            "task": "Implement or fix launch-control block iteration {loop.iteration}.\n\nOriginal task:\n{task}\n\nBlock plan:\n{outputs.plan}\n\nPrevious review, if any:\n{outputs.review.output}\n\nRules:\n- One writer only.\n- Use the real project stack and real integrations.\n- No mocks, demos, fallbacks, fake validation, or hidden shortcuts unless the user explicitly asked.\n- If this is iteration 1, implement exactly the block plan. If this is a later iteration, apply only required reviewer fixes.\n- If the plan is stale, acceptance criteria change, data/API model changes, or user decision is required, stop and report it instead of inventing scope.\n- Run the validation contract where possible.\n\nReturn changed files, commands run with exit codes, validation evidence, blockers, and any plan mismatch."
+          },
+          {
+            "id": "review",
+            "agent": "reviewer",
+            "output": "review-{loop.iteration}.json",
+            "gate": {
+              "type": "json-status",
+              "passStatuses": ["approved"],
+              "retryStatuses": ["changes_requested"],
+              "stopStatuses": ["blocked"]
+            },
+            "task": "Review launch-control build iteration {loop.iteration}. Do not edit project/source files.\n\nOriginal task:\n{task}\n\nBlock plan:\n{outputs.plan}\n\nBuilder report:\n{outputs.build.output}\n\nCheck: plan freshness, scope drift, correctness, real validation evidence, test coverage, hidden mocks/fallbacks/demos, over-large slice, and unlogged plan changes.\n\nReturn ONLY valid JSON matching this shape:\n{\n  \"status\": \"approved\" | \"changes_requested\" | \"blocked\",\n  \"summary\": \"short verdict\",\n  \"findings\": [{\"severity\": \"blocker|required|optional\", \"file\": \"path or null\", \"issue\": \"specific issue\", \"required_fix\": \"specific fix or null\"}],\n  \"validation_gaps\": [\"missing evidence\"],\n  \"plan_changed\": false,\n  \"requires_user_decision\": false\n}\n\nUse status=approved only when the diff and evidence satisfy the block plan. Use changes_requested for fixable required issues. Use blocked for missing credentials, stale plan, required user/product decision, or exhausted/unsafe scope."
+          }
+        ]
+      }
+    },
+    {
+      "id": "final-audit",
+      "agent": "reviewer",
+      "output": "final-audit.json",
+      "gate": {
+        "type": "json-status",
+        "passStatuses": ["complete", "approved"],
+        "stopStatuses": ["incomplete", "blocked"]
+      },
+      "task": "Run final launch-control completion audit. Do not edit files.\n\nOriginal task:\n{task}\n\nPlan:\n{outputs.plan}\n\nLast build:\n{outputs.build.output}\n\nLast review status: {outputs.review.status}\nLast review JSON:\n{outputs.review.json}\n\nVerify every explicit acceptance criterion, artifact, command, invariant, and stop condition against current repo state and available evidence.\n\nReturn ONLY valid JSON:\n{\n  \"status\": \"complete\" | \"incomplete\" | \"blocked\",\n  \"summary\": \"short audit result\",\n  \"verified_items\": [\"item\"],\n  \"remaining_blockers\": [\"blocker\"],\n  \"validation_gaps\": [\"gap\"]\n}"
+    }
+  ]
+}
