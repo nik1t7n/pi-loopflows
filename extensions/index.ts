@@ -129,8 +129,8 @@ class LoopflowWidget implements Component {
     
     const lines = [
       `┌── Loopflow Status: ${this.state.workflowName} ` + "─".repeat(Math.max(0, width - 23 - this.state.workflowName.length)) + "┐",
-      `│ Step: \x1b[32m${stepStr}\x1b[0m | Agent: \x1b[36m${agentStr}\x1b[0m | ${iterStr}` + " ".repeat(Math.max(0, width - 2 - cleanLine1.length)) + "│",
-      `│ Status: \x1b[35m${this.state.currentStatus}\x1b[0m` + " ".repeat(Math.max(0, width - 2 - cleanLine2.length)) + "│",
+      `│ Step: \x1b[32m${stepStr}\x1b[0m | Agent: \x1b[36m${agentStr}\x1b[0m | ${iterStr}` + " ".repeat(Math.max(0, width - 4 - cleanLine1.length)) + " │",
+      `│ Status: \x1b[35m${this.state.currentStatus}\x1b[0m` + " ".repeat(Math.max(0, width - 4 - cleanLine2.length)) + " │",
       `└` + border + "┘"
     ];
     return lines;
@@ -149,23 +149,55 @@ class LoopflowOverlay implements Component {
     this.onClose = onClose;
   }
 
-  private wrapText(text: string, width: number): string[] {
-    if (!text) return [""];
+  private ansiWordWrap(text: string, maxWidth: number): string[] {
     const lines: string[] = [];
     let currentLine = "";
-    const words = text.split(" ");
-    for (const word of words) {
-      const cleanWord = word.replace(/\x1b\[[0-9;]*m/g, "");
-      const cleanCurrent = currentLine.replace(/\x1b\[[0-9;]*m/g, "");
-      if (cleanCurrent.length + cleanWord.length + 1 > width) {
-        if (currentLine) lines.push(currentLine);
-        currentLine = word;
-      } else {
-        currentLine = currentLine ? currentLine + " " + word : word;
+    let currentCleanLength = 0;
+    let activeStyles: string[] = [];
+    
+    let i = 0;
+    while (i < text.length) {
+      if (text[i] === "\x1b" && text[i + 1] === "[") {
+        let j = i + 2;
+        while (j < text.length && text[j] !== "m") {
+          j++;
+        }
+        if (j < text.length) {
+          const sequence = text.slice(i, j + 1);
+          currentLine += sequence;
+          if (sequence === "\x1b[0m") {
+            activeStyles = [];
+          } else {
+            activeStyles.push(sequence);
+          }
+          i = j + 1;
+          continue;
+        }
       }
+      
+      const char = text[i];
+      if (char === "\n") {
+        lines.push(currentLine + "\x1b[0m");
+        currentLine = activeStyles.join("");
+        currentCleanLength = 0;
+      } else {
+        currentLine += char;
+        currentCleanLength++;
+        
+        if (currentCleanLength >= maxWidth) {
+          lines.push(currentLine + "\x1b[0m");
+          currentLine = activeStyles.join("");
+          currentCleanLength = 0;
+        }
+      }
+      i++;
     }
-    if (currentLine) lines.push(currentLine);
-    return lines;
+    
+    if (currentCleanLength > 0 || currentLine.replace(/\x1b\[[0-9;]*m/g, "").length > 0) {
+      lines.push(currentLine + "\x1b[0m");
+    }
+    
+    return lines.length > 0 ? lines : [""];
   }
 
   render(width: number): string[] {
@@ -176,7 +208,7 @@ class LoopflowOverlay implements Component {
     lines.push(`┌${border}┐`);
     const titleText = `Loopflow Live: ${this.state.workflowName}`;
     const cleanTitle = titleText.replace(/\x1b\[[0-9;]*m/g, "");
-    lines.push(`│ \x1b[1m\x1b[33m${titleText}\x1b[0m` + " ".repeat(Math.max(0, width - 2 - cleanTitle.length)) + "│");
+    lines.push(`│ \x1b[1m\x1b[33m${titleText}\x1b[0m` + " ".repeat(Math.max(0, width - 4 - cleanTitle.length)) + " │");
     lines.push(`├${border}┤`);
 
     // Active details
@@ -185,11 +217,11 @@ class LoopflowOverlay implements Component {
     const iterStr = this.state.activeIteration ? `Iteration: ${this.state.activeIteration}` : "none";
     const detailText = `Step: ${stepStr} | Agent: ${agentStr} | ${iterStr}`;
     const cleanDetail = detailText.replace(/\x1b\[[0-9;]*m/g, "");
-    lines.push(`│ Step: \x1b[32m${stepStr}\x1b[0m | Agent: \x1b[36m${agentStr}\x1b[0m | ${iterStr}` + " ".repeat(Math.max(0, width - 2 - cleanDetail.length)) + "│");
+    lines.push(`│ Step: \x1b[32m${stepStr}\x1b[0m | Agent: \x1b[36m${agentStr}\x1b[0m | ${iterStr}` + " ".repeat(Math.max(0, width - 4 - cleanDetail.length)) + " │");
     
     const statusText = `Status: ${this.state.currentStatus}`;
     const cleanStatus = statusText.replace(/\x1b\[[0-9;]*m/g, "");
-    lines.push(`│ Status: \x1b[35m${this.state.currentStatus}\x1b[0m` + " ".repeat(Math.max(0, width - 2 - cleanStatus.length)) + "│");
+    lines.push(`│ Status: \x1b[35m${this.state.currentStatus}\x1b[0m` + " ".repeat(Math.max(0, width - 4 - cleanStatus.length)) + " │");
     lines.push(`├${border}┤`);
 
     // Tab Header
@@ -197,7 +229,7 @@ class LoopflowOverlay implements Component {
     const tab1 = isGen ? "\x1b[7m [1] GENERAL MAP \x1b[27m" : " [1] GENERAL MAP ";
     const tab2 = !isGen ? "\x1b[7m [2] AGENT THOUGHTS \x1b[27m" : " [2] AGENT THOUGHTS ";
     const tabsUnstyled = " [1] GENERAL MAP  [2] AGENT THOUGHTS ";
-    lines.push(`│${tab1}${tab2}` + " ".repeat(Math.max(0, width - 2 - tabsUnstyled.length)) + "│");
+    lines.push(`│ ${tab1}${tab2}` + " ".repeat(Math.max(0, width - 4 - tabsUnstyled.length)) + " │");
     lines.push(`├${border}┤`);
 
     // Content area
@@ -261,7 +293,7 @@ class LoopflowOverlay implements Component {
         // Wrap all lines beautifully to the content width
         const wrappedLogs: string[] = [];
         rawLogs.forEach(log => {
-          wrappedLogs.push(...this.wrapText(log, contentWidth));
+          wrappedLogs.push(...this.ansiWordWrap(log, contentWidth));
         });
 
         // Limit scrolling to valid range
@@ -274,7 +306,9 @@ class LoopflowOverlay implements Component {
           visibleLogs.push("");
         }
 
-        lines.push(`│ \x1b[1m=== Thoughts of ${agentName} (Scroll: ${this.scrollTop}/${maxScroll}) ===\x1b[0m` + " ".repeat(Math.max(0, contentWidth - 21 - agentName.length - String(this.scrollTop).length - String(maxScroll).length)) + " │");
+        const titleHeader = `=== Thoughts of ${agentName} (Scroll: ${this.scrollTop}/${maxScroll}) ===`;
+        const cleanHeader = titleHeader.replace(/\x1b\[[0-9;]*m/g, "").length;
+        lines.push(`│ \x1b[1m${titleHeader}\x1b[0m` + " ".repeat(Math.max(0, contentWidth - cleanHeader)) + " │");
         
         visibleLogs.slice(0, maxLines).forEach(ln => {
           const plainLength = ln.replace(/\x1b\[[0-9;]*m/g, "").length;
@@ -292,7 +326,7 @@ class LoopflowOverlay implements Component {
     } else {
       footerText = "Press [↑/↓] Scroll | [b/Esc] Back to List | [Tab] Map";
     }
-    lines.push(`│ \x1b[2m${footerText}\x1b[0m` + " ".repeat(Math.max(0, width - 2 - footerText.length)) + "│");
+    lines.push(`│ \x1b[2m${footerText}\x1b[0m` + " ".repeat(Math.max(0, width - 4 - footerText.length)) + " │");
     lines.push(`└${border}┘`);
 
     return lines;
