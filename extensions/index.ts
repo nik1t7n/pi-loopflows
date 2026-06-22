@@ -797,6 +797,9 @@ class PiSubprocessAdapter implements ExecutorAdapter {
     const invocation = getPiInvocation(args);
     let stdout = "";
     let stderr = "";
+    let finalText = "";
+    let providerError: string | undefined;
+    let hadAssistantMessage = false;
     const retainedStdoutLimit = 250_000;
     const appendRetainedStdout = (line: string) => {
       if (stdout.length >= retainedStdoutLimit) return;
@@ -814,6 +817,17 @@ class PiSubprocessAdapter implements ExecutorAdapter {
         try {
           const ev = JSON.parse(line);
           options.onAgentEvent?.(ev);
+          if (ev.type === "message_end" && ev.message?.role === "assistant") {
+            hadAssistantMessage = true;
+            const msg = ev.message;
+            if (msg.stopReason === "error" || msg.errorMessage) {
+              const details = summarizeProviderDiagnostics(msg);
+              providerError = [msg.errorMessage || "Provider returned an error", details].filter(Boolean).join(". Diagnostics: ");
+            }
+            for (const part of msg.content ?? []) {
+              if (part?.type === "text" && typeof part.text === "string") finalText = part.text;
+            }
+          }
           // message_update can be extremely large/noisy (streaming deltas). Keep it live-only.
           if (ev.type !== "message_update") appendRetainedStdout(line);
         } catch {
@@ -847,16 +861,15 @@ class PiSubprocessAdapter implements ExecutorAdapter {
       fs.rmSync(tmp.dir, { recursive: true, force: true });
     }
 
-    const parsed = parsePiJsonLines(stdout);
-    if (parsed.providerError) {
+    if (providerError) {
       return {
-        output: parsed.finalText || stdout.trim(),
+        output: finalText || stdout.trim(),
         exitCode: exitCode === 0 ? 1 : exitCode,
-        stderr: [stderr.trim(), `Provider error from agent '${agentName}': ${parsed.providerError}`].filter(Boolean).join("\n")
+        stderr: [stderr.trim(), `Provider error from agent '${agentName}': ${providerError}`].filter(Boolean).join("\n")
       };
     }
 
-    if (exitCode === 0 && parsed.hadAssistantMessage && !parsed.finalText.trim()) {
+    if (exitCode === 0 && hadAssistantMessage && !finalText.trim()) {
       return {
         output: stdout.trim(),
         exitCode: 1,
@@ -864,7 +877,7 @@ class PiSubprocessAdapter implements ExecutorAdapter {
       };
     }
 
-    return { output: parsed.finalText || (exitCode === 0 ? stdout.trim() : truncateForError(stdout, 12000)), exitCode, stderr };
+    return { output: finalText || (exitCode === 0 ? stdout.trim() : truncateForError(stdout, 12000)), exitCode, stderr };
   }
 }
 
