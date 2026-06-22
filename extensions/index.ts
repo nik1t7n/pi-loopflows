@@ -572,20 +572,41 @@ function extractJson(text: string): any | undefined {
   return undefined;
 }
 
-function finalAssistantTextFromJsonLines(stdout: string): string {
-  let final = "";
+function summarizeProviderDiagnostics(msg: any): string {
+  const diagnostics = Array.isArray(msg?.diagnostics) ? msg.diagnostics : [];
+  const summaries = diagnostics.slice(0, 3).map((d: any) => {
+    const type = d?.type ? `${d.type}: ` : "";
+    const error = d?.error?.message || d?.message || "";
+    const phase = d?.details?.phase ? ` (phase: ${d.details.phase})` : "";
+    const requestBytes = d?.details?.requestBytes ? ` (requestBytes: ${d.details.requestBytes})` : "";
+    return `${type}${error}${phase}${requestBytes}`.trim();
+  }).filter(Boolean);
+  return summaries.join("; ");
+}
+
+function parsePiJsonLines(stdout: string): { finalText: string; providerError?: string; hadAssistantMessage: boolean } {
+  let finalText = "";
+  let providerError: string | undefined;
+  let hadAssistantMessage = false;
+
   for (const line of stdout.split(/\r?\n/)) {
     if (!line.trim()) continue;
     let ev: any;
     try { ev = JSON.parse(line); } catch { continue; }
     const msg = ev.message;
     if (ev.type === "message_end" && msg?.role === "assistant") {
+      hadAssistantMessage = true;
+      if (msg.stopReason === "error" || msg.errorMessage) {
+        const details = summarizeProviderDiagnostics(msg);
+        providerError = [msg.errorMessage || "Provider returned an error", details].filter(Boolean).join(". Diagnostics: ");
+      }
       for (const part of msg.content ?? []) {
-        if (part.type === "text") final = part.text;
+        if (part.type === "text") finalText = part.text;
       }
     }
   }
-  return final;
+
+  return { finalText, providerError, hadAssistantMessage };
 }
 
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
@@ -669,7 +690,25 @@ class PiSubprocessAdapter implements ExecutorAdapter {
     if (tmp) {
       fs.rmSync(tmp.dir, { recursive: true, force: true });
     }
-    return { output: finalAssistantTextFromJsonLines(stdout) || stdout.trim(), exitCode, stderr };
+
+    const parsed = parsePiJsonLines(stdout);
+    if (parsed.providerError) {
+      return {
+        output: parsed.finalText || stdout.trim(),
+        exitCode: exitCode === 0 ? 1 : exitCode,
+        stderr: [stderr.trim(), `Provider error from agent '${agentName}': ${parsed.providerError}`].filter(Boolean).join("\n")
+      };
+    }
+
+    if (exitCode === 0 && parsed.hadAssistantMessage && !parsed.finalText.trim()) {
+      return {
+        output: stdout.trim(),
+        exitCode: 1,
+        stderr: [stderr.trim(), `Agent '${agentName}' completed with an empty assistant response.`].filter(Boolean).join("\n")
+      };
+    }
+
+    return { output: parsed.finalText || stdout.trim(), exitCode, stderr };
   }
 }
 
