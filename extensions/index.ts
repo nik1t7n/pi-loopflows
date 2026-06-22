@@ -1214,6 +1214,21 @@ const RunParams = Type.Object({
 });
 
 export default function (pi: ExtensionAPI) {
+  pi.on("agent_start", (event, ctx) => {
+    try {
+      ctx.ui.setWidget("loopflow-status", undefined);
+      setTimeout(() => {
+        if (activeTuiState) {
+          ctx.ui.setWidget("loopflow-status", (tui: any, theme: any) => {
+            return new LoopflowWidget(activeTuiState!);
+          });
+        }
+      }, 100);
+    } catch {
+      // Ignore
+    }
+  });
+
   pi.registerTool({
     name: "loopflow_run",
     label: "Loopflow Run",
