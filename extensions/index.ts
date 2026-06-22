@@ -828,8 +828,8 @@ class PiSubprocessAdapter implements ExecutorAdapter {
               if (part?.type === "text" && typeof part.text === "string") finalText = part.text;
             }
           }
-          // message_update can be extremely large/noisy (streaming deltas). Keep it live-only.
-          if (ev.type !== "message_update") appendRetainedStdout(line);
+          // Streaming deltas/partial tool output can be extremely large/noisy. Keep them live-only.
+          if (ev.type !== "message_update" && ev.type !== "tool_execution_update") appendRetainedStdout(line);
         } catch {
           appendRetainedStdout(line);
         }
