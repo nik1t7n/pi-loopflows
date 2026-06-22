@@ -116,22 +116,14 @@ class LoopflowWidget implements Component {
     this.state = state;
   }
   render(width: number): string[] {
-    const border = "─".repeat(width - 2);
     const stepStr = this.state.activeStep || "none";
     const agentStr = this.state.activeAgent || "none";
     const iterStr = this.state.activeIteration ? `Iteration: ${this.state.activeIteration}` : "none";
     
-    const line1 = `Step: ${stepStr} | Agent: ${agentStr} | ${iterStr}`;
-    const line2 = `Status: ${this.state.currentStatus}`;
-    
-    const cleanLine1 = line1.replace(/\x1b\[[0-9;]*m/g, "");
-    const cleanLine2 = line2.replace(/\x1b\[[0-9;]*m/g, "");
-    
     const lines = [
-      `┌── Loopflow Status: ${this.state.workflowName} ` + "─".repeat(Math.max(0, width - 23 - this.state.workflowName.length)) + "┐",
-      `│ Step: \x1b[32m${stepStr}\x1b[0m | Agent: \x1b[36m${agentStr}\x1b[0m | ${iterStr}` + " ".repeat(Math.max(0, width - 4 - cleanLine1.length)) + " │",
-      `│ Status: \x1b[35m${this.state.currentStatus}\x1b[0m` + " ".repeat(Math.max(0, width - 4 - cleanLine2.length)) + " │",
-      `└` + border + "┘"
+      `\x1b[1m\x1b[33m● Loopflow Status: ${this.state.workflowName}\x1b[0m`,
+      `  Step: \x1b[32m${stepStr}\x1b[0m | Agent: \x1b[36m${agentStr}\x1b[0m | ${iterStr}`,
+      `  Status: \x1b[35m${this.state.currentStatus}\x1b[0m`
     ];
     return lines;
   }
@@ -1222,14 +1214,6 @@ const RunParams = Type.Object({
 });
 
 export default function (pi: ExtensionAPI) {
-  pi.on("agent_start", (event, ctx) => {
-    try {
-      ctx.ui.setWidget("loopflow-status", undefined);
-    } catch {
-      // Ignore
-    }
-  });
-
   pi.registerTool({
     name: "loopflow_run",
     label: "Loopflow Run",
