@@ -115,6 +115,37 @@ class LoopflowWidget implements Component {
   constructor(state: TuiState) {
     this.state = state;
   }
+  
+  private truncateAnsi(text: string, maxWidth: number): string {
+    let result = "";
+    let cleanLength = 0;
+    let activeStyles: string[] = [];
+    let i = 0;
+    while (i < text.length && cleanLength < maxWidth) {
+      if (text[i] === "\x1b" && text[i + 1] === "[") {
+        let j = i + 2;
+        while (j < text.length && text[j] !== "m") {
+          j++;
+        }
+        if (j < text.length) {
+          const sequence = text.slice(i, j + 1);
+          result += sequence;
+          if (sequence === "\x1b[0m") activeStyles = [];
+          else activeStyles.push(sequence);
+          i = j + 1;
+          continue;
+        }
+      }
+      result += text[i];
+      cleanLength++;
+      i++;
+    }
+    if (cleanLength >= maxWidth) {
+      result += "\x1b[0m";
+    }
+    return result;
+  }
+
   render(width: number): string[] {
     const stepStr = this.state.activeStep || "none";
     const agentStr = this.state.activeAgent || "none";
@@ -122,13 +153,17 @@ class LoopflowWidget implements Component {
     
     const titleText = `● Loopflow Status: ${this.state.workflowName}`;
     const cleanTitle = titleText.replace(/\x1b\[[0-9;]*m/g, "");
-    const headerLine = `\x1b[2m───\x1b[0m \x1b[1m\x1b[33m●\x1b[0m \x1b[1mLoopflow Status: ${this.state.workflowName}\x1b[0m \x1b[2m` + "─".repeat(Math.max(0, width - 6 - cleanTitle.length)) + "\x1b[0m";
+    const dashCount = Math.max(0, width - 6 - cleanTitle.length);
+    const headerLine = `\x1b[2m───\x1b[0m \x1b[1m\x1b[33m●\x1b[0m \x1b[1mLoopflow Status: ${this.state.workflowName}\x1b[0m \x1b[2m` + "─".repeat(dashCount) + "\x1b[0m";
     
     const detailText = `  Step: \x1b[32m${stepStr}\x1b[0m | Agent: \x1b[36m${agentStr}\x1b[0m | ${iterStr}  |  \x1b[2m${this.state.currentStatus}\x1b[0m`;
     const cleanDetail = detailText.replace(/\x1b\[[0-9;]*m/g, "");
     const detailLine = detailText + " ".repeat(Math.max(0, width - cleanDetail.length));
     
-    return [headerLine, detailLine];
+    return [
+      this.truncateAnsi(headerLine, width),
+      this.truncateAnsi(detailLine, width)
+    ];
   }
   invalidate() {}
 }
@@ -1217,6 +1252,21 @@ const RunParams = Type.Object({
 });
 
 export default function (pi: ExtensionAPI) {
+  pi.on("agent_start", (event, ctx) => {
+    try {
+      ctx.ui.setWidget("loopflow-status", undefined);
+      setTimeout(() => {
+        if (activeTuiState) {
+          ctx.ui.setWidget("loopflow-status", (tui: any, theme: any) => {
+            return new LoopflowWidget(activeTuiState!);
+          });
+        }
+      }, 100);
+    } catch {
+      // Ignore
+    }
+  });
+
   pi.registerTool({
     name: "loopflow_run",
     label: "Loopflow Run",
