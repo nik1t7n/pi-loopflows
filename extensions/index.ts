@@ -1129,7 +1129,7 @@ async function runWorkflow(workflow: WorkflowDef, task: string, opts: { cwd: str
     try {
       opts.extensionCtx.ui.setWidget("loopflow-status", (tui: any, theme: any) => {
         return new LoopflowWidget(tuiState);
-      }, { placement: "belowEditor" });
+      }, { placement: "aboveEditor" });
     } catch {
       // Ignore
     }
