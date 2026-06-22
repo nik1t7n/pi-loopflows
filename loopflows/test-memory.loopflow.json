@@ -1,7 +1,7 @@
 {
   "name": "test-memory",
   "version": "1.0.0",
-  "description": "Validation loopflow to test Observational Memory (Observer and Reflector) and agentmemory integration.",
+  "description": "Validation loopflow to test Observational Memory (Observer and Reflector) and agent session persistence.",
   "backend": "pi-subprocess",
   "defaults": {
     "agentScope": "both"

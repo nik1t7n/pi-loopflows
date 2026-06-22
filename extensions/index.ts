@@ -973,7 +973,9 @@ class PiSubprocessAdapter implements ExecutorAdapter {
     if (!agent && !options.overrideSystemPrompt) {
       return { output: "", exitCode: 1, stderr: `Unknown agent ${agentName}. Available: ${[...agents.keys()].sort().join(", ")}` };
     }
-    const args = ["--mode", "json", "-p", "--no-session"];
+    const workflowName = activeRun?.workflow?.name || "default";
+    const sessionId = `loopflow-${safeName(workflowName)}-${safeName(agentName)}`.toLowerCase();
+    const args = ["--mode", "json", "-p", "--session-id", sessionId];
     const model = options.model ?? agent?.model;
     const tools = options.tools ?? agent?.tools;
     if (model) args.push("--model", model);
@@ -1022,7 +1024,13 @@ class PiSubprocessAdapter implements ExecutorAdapter {
               providerError = [msg.errorMessage || "Provider returned an error", details].filter(Boolean).join(". Diagnostics: ");
             }
             for (const part of msg.content ?? []) {
-              if (part?.type === "text" && typeof part.text === "string") finalText = part.text;
+              if (part?.type === "text" && typeof part.text === "string" && part.text.trim()) {
+                if (finalText) {
+                  finalText += "\n" + part.text;
+                } else {
+                  finalText = part.text;
+                }
+              }
             }
           }
           // Streaming deltas/partial tool output can be extremely large/noisy. Keep them live-only.
@@ -1077,11 +1085,11 @@ class PiSubprocessAdapter implements ExecutorAdapter {
       };
     }
 
-    if (exitCode === 0 && hadAssistantMessage && !finalText.trim()) {
+    if (exitCode === 0 && !hadAssistantMessage) {
       return {
         output: stdout.trim(),
         exitCode: 1,
-        stderr: [stderr.trim(), `Agent '${agentName}' completed with an empty assistant response.`].filter(Boolean).join("\n")
+        stderr: [stderr.trim(), `Agent '${agentName}' exited without any assistant messages.`].filter(Boolean).join("\n")
       };
     }
 
@@ -1099,41 +1107,6 @@ async function saveArtifact(ctx: RunContext, name: string, content: string): Pro
 function estimateTokens(text: string): number {
   if (!text) return 0;
   return Math.ceil(text.length / 3.5);
-}
-
-async function queryAgentMemory(task: string, cwd: string): Promise<string> {
-  const agentmemoryUrl = process.env.AGENTMEMORY_URL || "http://127.0.0.1:3111";
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 2000);
-    const response = await fetch(`${agentmemoryUrl}/agentmemory/search`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query: task, limit: 5 }),
-      signal: controller.signal
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      throw new Error(`agentmemory daemon returned status ${response.status}: ${response.statusText}`);
-    }
-    const data = await response.json() as any;
-    if (!data || !Array.isArray(data.results)) {
-      throw new Error("agentmemory search returned invalid response format");
-    }
-    if (data.results.length === 0) return "";
-    return [
-      "<relevant_project_memory>",
-      ...data.results.slice(0, 5).map((r: any) => {
-        const obs = r.observation ?? {};
-        const title = obs.title || obs.subtitle || "Memory";
-        const body = obs.narrative || obs.text || JSON.stringify(obs);
-        return `- [${obs.timestamp || "Recall"}] ${title}: ${body}`;
-      }),
-      "</relevant_project_memory>\n\n"
-    ].join("\n");
-  } catch (err: any) {
-    throw new Error(`Failed to query agentmemory: ${err?.message || err}. Ensure that the agentmemory daemon is running on ${agentmemoryUrl}. Start it in your terminal by running 'agentmemory'.`);
-  }
 }
 
 function parseObserverOutput(output: string) {
@@ -1235,9 +1208,7 @@ async function runStep(def: StepDef, ctx: RunContext, adapter: ExecutorAdapter, 
       messageBag[def.agent] = [];
     }
 
-    // Auto-inject agentmemory context (CLI-first via API)
-    const memoryContext = await queryAgentMemory(prepared, ctx.cwd);
-    return memoryContext ? memoryContext + prepared : prepared;
+    return prepared;
   };
 
   let task = await prepareTask();
@@ -1253,7 +1224,7 @@ async function runStep(def: StepDef, ctx: RunContext, adapter: ExecutorAdapter, 
     if (run.exitCode === -22) {
       restarts++;
       if (restarts > 3) throw new Error(`Step '${def.id}' restarted too many times from live steering/interrupt messages.`);
-      // Re-render the full task so newly queued messages, OM, and agentmemory are injected consistently.
+      // Re-render the full task so newly queued messages and OM are injected consistently.
       task = await prepareTask();
       continue;
     }
@@ -1534,7 +1505,14 @@ async function runLoop(loop: LoopDef, ctx: RunContext, adapter: ExecutorAdapter,
         appendTuiEventLog(tuiState, step.agent, completedLog, triggerRender);
       }
 
-      if (result.exitCode !== 0) return result;
+      const isGate = step.id === loop.gateStep;
+      const hasValidGateStatus = isGate && result.status && (
+        (loop.passStatuses ?? ["approved", "complete"]).includes(result.status) ||
+        (loop.stopStatuses ?? ["blocked"]).includes(result.status) ||
+        (loop.retryStatuses ?? ["changes_requested", "incomplete"]).includes(result.status)
+      );
+
+      if (result.exitCode !== 0 && !hasValidGateStatus) return result;
     }
     const status = lastGate?.status;
     if (lastGate?.json?.parse_error || !status) {
