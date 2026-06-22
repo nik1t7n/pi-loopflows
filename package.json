@@ -1,6 +1,6 @@
 {
   "name": "pi-loopflows",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Deterministic loop workflows for Pi subagents: steps, gates, feedback loops, and artifacts.",
   "license": "MIT",
   "author": "Nikita Nosov <20nik.nosov21@gmail.com>",
@@ -28,6 +28,7 @@
     "skills",
     "scripts",
     "README.md",
+    "VERSIONING.md",
     "LICENSE",
     "CHANGELOG.md"
   ],

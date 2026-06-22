@@ -278,6 +278,16 @@ worker → reviewer → worker → reviewer
 
 If you need a feedback loop, a quality gate, a max iteration limit, or saved evidence, use a loopflow.
 
+## Versioning
+
+`pi-loopflows` uses semantic versioning: `MAJOR.MINOR.PATCH`.
+
+- PATCH for docs, bug fixes, prompt polish, validation improvements, and internal refactors with no user-facing behavior change.
+- MINOR for new backward-compatible features, bundled loopflows, commands, options, fields, or adapter backends.
+- MAJOR for breaking changes to loopflow JSON shape, template variables, gate semantics, commands, artifact paths, or adapter behavior.
+
+See [`VERSIONING.md`](VERSIONING.md) for the release checklist.
+
 ## Status
 
 `pi-loopflows` is early, but designed as a real product surface rather than a one-off script. The core model is intentionally small:

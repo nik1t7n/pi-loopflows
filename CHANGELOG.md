@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3 - 2026-06-22
+
+- Add clear semantic versioning policy and release checklist.
+- Include `VERSIONING.md` in the published package.
+- Add concise versioning guidance to README.
+
 ## 0.1.2 - 2026-06-22
 
 - Tighten README positioning around loopflows as LEGO-like subagent workflows.
