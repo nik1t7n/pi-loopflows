@@ -97,6 +97,7 @@ type RunContext = {
 };
 
 type RunState = "running" | "pausing" | "paused" | "resuming" | "terminating" | "terminated" | "failed" | "completed";
+type DeliveryMode = "queue" | "steer" | "interrupt";
 
 type ResumeCursor = {
   workflowIndex: number;
@@ -122,6 +123,8 @@ type ActiveRun = {
   currentStep?: string;
   checkpoint?: ResumeCursor;
   terminalReason?: string;
+  pendingStepRestart?: { agent: string; reason: string };
+  pendingSteerAgent?: string;
 };
 
 class LoopflowPauseError extends Error {
@@ -221,6 +224,7 @@ class LoopflowOverlay implements Component {
   private lastDownAt: number = 0;
   private composing: boolean = false;
   private composeText: string = "";
+  private messageMode: DeliveryMode = "steer";
   
   constructor(state: TuiState, onClose: () => void, extensionCtx?: any) {
     this.state = state;
@@ -240,7 +244,7 @@ class LoopflowOverlay implements Component {
     const agent = this.state.selectedAgent && this.state.selectedAgent !== "global" ? this.state.selectedAgent : this.state.activeAgent;
     const text = this.composeText.trim();
     if (!agent || !text) return;
-    const ok = queueAgentMessage(agent, text, "overlay-inline");
+    const ok = queueAgentMessage(agent, text, "overlay-inline", this.messageMode);
     this.extensionCtx?.ui?.notify?.(ok ? `Queued message for ${agent}` : "No active/paused loopflow.", ok ? "info" : "error");
     this.composeText = "";
     this.composing = false;
@@ -425,7 +429,7 @@ class LoopflowOverlay implements Component {
     lines.push(`├${border}┤`);
     if (isAgentDetail) {
       const agentName = this.state.selectedAgent || this.state.activeAgent || "agent";
-      const promptPrefix = this.composing ? `Message ${agentName}: ` : `Message ${agentName}: `;
+      const promptPrefix = this.composing ? `Message ${agentName} [${this.messageMode}]: ` : `Message ${agentName} [${this.messageMode}]: `;
       const cursor = this.composing ? "▌" : "";
       const inputText = this.composing ? this.composeText : "press m/i to type here";
       const styledInput = `${promptPrefix}${this.composing ? "\x1b[37m" : "\x1b[2m"}${inputText}${cursor}\x1b[0m`;
@@ -441,7 +445,7 @@ class LoopflowOverlay implements Component {
     } else {
       footerText = this.composing
         ? "Type message here | [Enter] send | [Esc] cancel | [Backspace] delete"
-        : "[m/i] focus msg bar | [↑] scroll | double [↓] bottom | [p] pause [r] resume [x] terminate";
+        : "[m/i] type | []] mode queue/steer/interrupt | [↑/↓] scroll | [p] pause [r] resume [x] terminate";
     }
     lines.push(`│ \x1b[2m${footerText}\x1b[0m` + " ".repeat(Math.max(0, width - 4 - footerText.length)) + " │");
     lines.push(`└${border}┘`);
@@ -502,6 +506,10 @@ class LoopflowOverlay implements Component {
     } else if (matchesKey(data, "x")) {
       const ok = requestTerminateActiveRun("Terminated from loopflow overlay");
       this.extensionCtx?.ui?.notify?.(ok ? "Loopflow terminate requested." : "No active loopflow to terminate.", ok ? "warning" : "error");
+    } else if (data === "]") {
+      this.messageMode = this.messageMode === "queue" ? "steer" : this.messageMode === "steer" ? "interrupt" : "queue";
+      this.extensionCtx?.ui?.notify?.(`Loopflow agent message mode: ${this.messageMode}`, "info");
+      this.requestRender();
     } else if (matchesKey(data, "m") || matchesKey(data, "i")) {
       if (this.state.viewMode === "thoughts" && this.state.selectedAgent !== null && this.state.selectedAgent !== "global") {
         this.composing = true;
@@ -968,6 +976,12 @@ class PiSubprocessAdapter implements ExecutorAdapter {
         try {
           const ev = JSON.parse(line);
           options.onAgentEvent?.(ev);
+          const isBoundary = ev.type === "tool_execution_end" || ev.type === "tool_result_end" || ev.type === "turn_end" || (ev.type === "message_end" && ev.message?.role === "toolResult");
+          if (isBoundary && activeRun?.currentProc === proc && activeRun.pendingSteerAgent && activeRun.pendingSteerAgent === activeRun.currentAgent) {
+            activeRun.pendingStepRestart = { agent: activeRun.currentAgent, reason: "steer message after boundary" };
+            activeRun.pendingSteerAgent = undefined;
+            proc.kill("SIGINT");
+          }
           if (ev.type === "message_end" && ev.message?.role === "assistant") {
             hadAssistantMessage = true;
             const msg = ev.message;
@@ -999,15 +1013,19 @@ class PiSubprocessAdapter implements ExecutorAdapter {
       proc.stderr.on("data", (d) => { stderr += d.toString(); });
       proc.on("close", (code) => {
         if (buffer.trim()) processLine(buffer);
+        const restart = activeRun?.currentProc === proc ? activeRun.pendingStepRestart : undefined;
         if (activeRun?.currentProc === proc) activeRun.currentProc = undefined;
-        if (activeRun?.state === "pausing") resolve(-20);
+        if (restart) {
+          if (activeRun) activeRun.pendingStepRestart = undefined;
+          resolve(-22);
+        } else if (activeRun?.state === "pausing") resolve(-20);
         else if (activeRun?.state === "terminating") resolve(-21);
         else resolve(code ?? 0);
       });
       proc.on("error", (err) => {
         if (activeRun?.currentProc === proc) activeRun.currentProc = undefined;
         stderr += String(err?.message ?? err);
-        resolve(activeRun?.state === "terminating" ? -21 : activeRun?.state === "pausing" ? -20 : 1);
+        resolve(activeRun?.pendingStepRestart ? -22 : activeRun?.state === "terminating" ? -21 : activeRun?.state === "pausing" ? -20 : 1);
       });
       if (options.signal) {
         const kill = () => { proc.kill("SIGTERM"); setTimeout(() => proc.kill("SIGKILL"), 3000); };
@@ -1164,37 +1182,51 @@ async function buildDeterministicContext(def: StepDef, ctx: RunContext, iteratio
 async function runStep(def: StepDef, ctx: RunContext, adapter: ExecutorAdapter, scope: "user" | "project" | "both", signal: AbortSignal | undefined, iteration?: number, onAgentEvent?: (event: any) => void): Promise<StepResult> {
   if (def.agent === "builtin-context") return buildDeterministicContext(def, ctx, iteration);
 
-  let task = renderTemplate(def.task, ctx, iteration);
-  
-  // Natively inject Observational Memory if active but not explicitly placed in template
-  const hasObservationsPlaceholder = def.task.includes("{loop.observations}");
-  if (!hasObservationsPlaceholder && ctx.params.observations) {
-    task += `\n\n=== Loop Execution History (Observational Memory) ===\n${ctx.params.observations}`;
-    if (ctx.params.reflections) {
-      task += `\n\n=== High-Level Reflections ===\n${ctx.params.reflections}`;
+  const prepareTask = async () => {
+    let prepared = renderTemplate(def.task, ctx, iteration);
+    
+    // Natively inject Observational Memory if active but not explicitly placed in template
+    const hasObservationsPlaceholder = def.task.includes("{loop.observations}");
+    if (!hasObservationsPlaceholder && ctx.params.observations) {
+      prepared += `\n\n=== Loop Execution History (Observational Memory) ===\n${ctx.params.observations}`;
+      if (ctx.params.reflections) {
+        prepared += `\n\n=== High-Level Reflections ===\n${ctx.params.reflections}`;
+      }
     }
-  }
 
-  const messageBag = (ctx.params.agentMessages ?? {}) as Record<string, Array<{ message: string; source: string; ts: string }>>;
-  ctx.params.agentMessages = messageBag;
-  const pendingMessages = messageBag[def.agent] ?? [];
-  if (pendingMessages.length > 0) {
-    const liveInstructionBlock = `=== REQUIRED LIVE USER INSTRUCTIONS FOR AGENT '${def.agent}' ===\n${pendingMessages.map((m, i) => `${i + 1}. [${m.ts}] (${m.source}) ${m.message}`).join("\n")}\n\nYou MUST explicitly handle these live instructions in this step. If any instruction conflicts with safety, validation, or the workflow contract, do not ignore it; report the conflict explicitly in your final response.\n\n=== ORIGINAL STEP TASK ===\n`;
-    task = liveInstructionBlock + task;
-    messageBag[def.agent] = [];
-  }
+    const messageBag = (ctx.params.agentMessages ?? {}) as Record<string, Array<{ message: string; source: string; ts: string; mode?: DeliveryMode }>>;
+    ctx.params.agentMessages = messageBag;
+    const pendingMessages = messageBag[def.agent] ?? [];
+    if (pendingMessages.length > 0) {
+      const liveInstructionBlock = `=== REQUIRED LIVE USER INSTRUCTIONS FOR AGENT '${def.agent}' ===\n${pendingMessages.map((m, i) => `${i + 1}. [${m.ts}] (${m.source}/${m.mode ?? "queue"}) ${m.message}`).join("\n")}\n\nYou MUST explicitly handle these live instructions in this step. If any instruction conflicts with safety, validation, or the workflow contract, do not ignore it; report the conflict explicitly in your final response.\n\n=== ORIGINAL STEP TASK ===\n`;
+      prepared = liveInstructionBlock + prepared;
+      messageBag[def.agent] = [];
+    }
 
-  // Auto-inject agentmemory context (CLI-first via API)
-  const memoryContext = await queryAgentMemory(task, ctx.cwd);
-  if (memoryContext) {
-    task = memoryContext + task;
-  }
+    // Auto-inject agentmemory context (CLI-first via API)
+    const memoryContext = await queryAgentMemory(prepared, ctx.cwd);
+    return memoryContext ? memoryContext + prepared : prepared;
+  };
 
-  if (activeRun) {
-    activeRun.currentAgent = def.agent;
-    activeRun.currentStep = def.id;
+  let task = await prepareTask();
+
+  let run: { output: string; exitCode: number; stderr: string };
+  let restarts = 0;
+  while (true) {
+    if (activeRun) {
+      activeRun.currentAgent = def.agent;
+      activeRun.currentStep = def.id;
+    }
+    run = await adapter.runAgent(def.agent, task, { cwd: ctx.cwd, signal, model: def.model, tools: def.tools, scope, onAgentEvent });
+    if (run.exitCode === -22) {
+      restarts++;
+      if (restarts > 3) throw new Error(`Step '${def.id}' restarted too many times from live steering/interrupt messages.`);
+      // Re-render the full task so newly queued messages, OM, and agentmemory are injected consistently.
+      task = await prepareTask();
+      continue;
+    }
+    break;
   }
-  const run = await adapter.runAgent(def.agent, task, { cwd: ctx.cwd, signal, model: def.model, tools: def.tools, scope, onAgentEvent });
   if (run.exitCode === -20) throw new LoopflowPauseError(`Paused before completing step '${def.id}' (${def.agent}).`);
   if (run.exitCode === -21) throw new LoopflowTerminateError(`Terminated during step '${def.id}' (${def.agent}).`);
   const json = def.gate ? extractJson(run.output) : undefined;
@@ -1568,16 +1600,29 @@ function requestTerminateActiveRun(reason = "User requested terminate") {
   return true;
 }
 
-function queueAgentMessage(agent: string, message: string, source = "user") {
+function queueAgentMessage(agent: string, message: string, source = "user", mode: DeliveryMode = "queue") {
   const run = activeRun ?? pausedRun;
   if (!run) return false;
   const key = "agentMessages";
-  const bag = (run.ctx.params[key] ?? {}) as Record<string, Array<{ message: string; source: string; ts: string }>>;
+  const bag = (run.ctx.params[key] ?? {}) as Record<string, Array<{ message: string; source: string; ts: string; mode?: DeliveryMode }>>;
   if (!Array.isArray(bag[agent])) bag[agent] = [];
-  bag[agent].push({ message, source, ts: new Date().toISOString() });
+  bag[agent].push({ message, source, mode, ts: new Date().toISOString() });
   run.ctx.params[key] = bag;
+
+  const isActiveTarget = activeRun === run && run.currentAgent === agent && !!run.currentProc;
+  let status = `${mode} message queued for ${agent}`;
+  if (mode === "interrupt" && isActiveTarget) {
+    run.pendingStepRestart = { agent, reason: "interrupt message" };
+    run.currentProc?.kill("SIGINT");
+    status = `Interrupting ${agent} to deliver message...`;
+  } else if (mode === "steer" && isActiveTarget) {
+    run.pendingSteerAgent = agent;
+    status = `Will steer ${agent} after next tool/action boundary...`;
+  }
+
   if (run.tuiState) {
-    appendTuiEventLog(run.tuiState, agent, `\x1b[35m[User Message queued] ${message}\x1b[0m`, run.triggerRender, `Queued message for ${agent}`);
+    const label = mode === "interrupt" ? "User Interrupt" : mode === "steer" ? "User Steer" : "User Queue";
+    appendTuiEventLog(run.tuiState, agent, `\x1b[35m[${label}] ${message}\x1b[0m`, run.triggerRender, status);
   }
   void saveCheckpoint(run, run.checkpoint ?? { workflowIndex: 0 }).catch(() => {});
   return true;
@@ -1759,7 +1804,10 @@ ${result.stderr ? `\nStderr:\n${truncateForError(result.stderr)}` : ""}`);
       pausedRun = undefined;
       throw err;
     }
-    if (activeRun) setRunState(activeRun, "failed", err?.message || String(err));
+    if (activeRun) {
+      setRunState(activeRun, "failed", err?.message || String(err));
+      if (activeRun.id === run.id) activeRun = undefined;
+    }
     throw err;
   }
 
@@ -1922,17 +1970,20 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("loopflow-message", {
-    description: "Queue a live instruction for a loopflow agent: /loopflow-message <agent> -- <text>",
+    description: "Send a live instruction: /loopflow-message <agent> [queue|steer|interrupt] -- <text>",
     handler: async (args, ctx) => {
       const [agentPart, ...rest] = args.split(/\s+--\s+/);
-      const agent = agentPart.trim().split(/\s+/)[0];
-      const message = rest.join(" -- ").trim() || agentPart.trim().replace(/^\S+\s*/, "");
+      const parts = agentPart.trim().split(/\s+/).filter(Boolean);
+      const agent = parts[0];
+      const maybeMode = parts[1] as DeliveryMode | undefined;
+      const mode: DeliveryMode = maybeMode === "queue" || maybeMode === "steer" || maybeMode === "interrupt" ? maybeMode : "steer";
+      const message = rest.join(" -- ").trim() || parts.slice(maybeMode === mode ? 2 : 1).join(" ");
       if (!agent || !message) {
-        ctx.ui.notify("Usage: /loopflow-message <agent> -- <message>", "error");
+        ctx.ui.notify("Usage: /loopflow-message <agent> [queue|steer|interrupt] -- <message>", "error");
         return;
       }
-      const ok = queueAgentMessage(agent, message, "slash");
-      ctx.ui.notify(ok ? `Queued message for ${agent}. Pause/resume if you need the active agent to consume it immediately.` : "No active or paused loopflow.", ok ? "info" : "error");
+      const ok = queueAgentMessage(agent, message, "slash", mode);
+      ctx.ui.notify(ok ? `${mode} message accepted for ${agent}.` : "No active or paused loopflow.", ok ? "info" : "error");
     },
   });
 
