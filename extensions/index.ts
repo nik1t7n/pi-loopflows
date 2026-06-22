@@ -1103,6 +1103,13 @@ async function runLoop(loop: LoopDef, ctx: RunContext, adapter: ExecutorAdapter,
       if (result.exitCode !== 0) return result;
     }
     const status = lastGate?.status;
+    if (lastGate?.json?.parse_error || !status) {
+      throw new Error(`Gate step '${loop.gateStep}' failed: could not parse a valid status from agent output.
+Ensure your LLM API credentials are valid and the provider is online.
+Raw Output:
+${lastGate?.output}
+${lastGate?.stderr ? `\nStderr:\n${lastGate.stderr}` : ""}`);
+    }
     if (statusIn(status, loop.passStatuses, ["approved", "complete"])) return lastGate!;
     if (statusIn(status, loop.stopStatuses, ["blocked"])) return lastGate!;
     if (!statusIn(status, loop.retryStatuses, ["changes_requested", "incomplete"])) return lastGate!;
@@ -1236,8 +1243,23 @@ async function runWorkflow(workflow: WorkflowDef, task: string, opts: { cwd: str
         triggerRender();
       }
 
-      if (result.exitCode !== 0) break;
-      if (node.gate && statusIn(result.status, node.gate.stopStatuses, ["blocked", "incomplete"])) break;
+      if (result.exitCode !== 0) {
+        if (opts.extensionCtx) {
+          opts.extensionCtx.ui.notify(`Step '${node.id}' failed with exit code ${result.exitCode}`, "error");
+        }
+        throw new Error(`Step '${node.id}' failed with exit code ${result.exitCode}. Stderr: ${result.stderr}`);
+      }
+      
+      if (node.gate) {
+        if (result.json?.parse_error || !result.status) {
+          throw new Error(`Gate step '${node.id}' failed: could not parse a valid status from agent output.
+Ensure your LLM API credentials are valid and the provider is online.
+Raw Output:
+${result.output}
+${result.stderr ? `\nStderr:\n${result.stderr}` : ""}`);
+        }
+        if (statusIn(result.status, node.gate.stopStatuses, ["blocked", "incomplete"])) break;
+      }
     }
   }
 
