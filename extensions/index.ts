@@ -253,6 +253,21 @@ class LoopflowOverlay implements Component {
     this.requestRender();
   }
 
+  private visibleLength(text: string): number {
+    return text.replace(/\x1b\[[0-9;]*m/g, "").length;
+  }
+
+  private framedLine(text: string, contentWidth: number): string {
+    const rows = this.ansiWordWrap(text, contentWidth);
+    const clipped = rows[0] ?? "";
+    const clippedLength = this.visibleLength(clipped);
+    return `│ ${clipped}` + " ".repeat(Math.max(0, contentWidth - clippedLength)) + " │";
+  }
+
+  private framedWrappedLines(text: string, contentWidth: number, maxRows = Infinity): string[] {
+    return this.ansiWordWrap(text, contentWidth).slice(0, maxRows).map((row) => this.framedLine(row, contentWidth));
+  }
+
   private ansiWordWrap(text: string, maxWidth: number): string[] {
     const lines: string[] = [];
     let currentLine = "";
@@ -356,8 +371,7 @@ class LoopflowOverlay implements Component {
       }
       
       mapLines.slice(0, maxLines).forEach(ln => {
-        const plainLength = ln.replace(/\x1b\[[0-9;]*m/g, "").length;
-        lines.push(`│ ${ln}` + " ".repeat(Math.max(0, contentWidth - plainLength)) + " │");
+        lines.push(this.framedLine(ln, contentWidth));
       });
     } else {
       // Thoughts mode
@@ -388,8 +402,7 @@ class LoopflowOverlay implements Component {
         }
         
         mapLines.slice(0, maxLines).forEach(ln => {
-          const plainLength = ln.replace(/\x1b\[[0-9;]*m/g, "").length;
-          lines.push(`│ ${ln}` + " ".repeat(Math.max(0, contentWidth - plainLength)) + " │");
+          lines.push(this.framedLine(ln, contentWidth));
         });
       } else {
         // View thoughts of selected agent mode
@@ -416,12 +429,10 @@ class LoopflowOverlay implements Component {
 
         const followBadge = this.autoFollow ? " | follow:on" : " | follow:off";
         const titleHeader = `=== Thoughts of ${agentName} (Scroll: ${this.scrollTop}/${maxScroll}${followBadge}) ===`;
-        const cleanHeader = titleHeader.replace(/\x1b\[[0-9;]*m/g, "").length;
-        lines.push(`│ \x1b[1m${titleHeader}\x1b[0m` + " ".repeat(Math.max(0, contentWidth - cleanHeader)) + " │");
+        lines.push(this.framedLine(`\x1b[1m${titleHeader}\x1b[0m`, contentWidth));
         
         visibleLogs.slice(0, maxLines).forEach(ln => {
-          const plainLength = ln.replace(/\x1b\[[0-9;]*m/g, "").length;
-          lines.push(`│ ${ln}` + " ".repeat(Math.max(0, contentWidth - plainLength)) + " │");
+          lines.push(this.framedLine(ln, contentWidth));
         });
       }
     }
@@ -433,8 +444,9 @@ class LoopflowOverlay implements Component {
       const cursor = this.composing ? "▌" : "";
       const inputText = this.composing ? this.composeText : "press m/i to type here";
       const styledInput = `${promptPrefix}${this.composing ? "\x1b[37m" : "\x1b[2m"}${inputText}${cursor}\x1b[0m`;
-      const plainLength = `${promptPrefix}${inputText}${cursor}`.length;
-      lines.push(`│ ${styledInput}` + " ".repeat(Math.max(0, contentWidth - plainLength)) + " │");
+      const inputRows = this.ansiWordWrap(styledInput, contentWidth);
+      const visibleInputRows = this.composing ? inputRows.slice(-2) : inputRows.slice(0, 1);
+      visibleInputRows.forEach((row) => lines.push(this.framedLine(row, contentWidth)));
       lines.push(`├${border}┤`);
     }
     let footerText = "";
@@ -445,9 +457,9 @@ class LoopflowOverlay implements Component {
     } else {
       footerText = this.composing
         ? "Type message here | [Enter] send | [Esc] cancel | [Backspace] delete"
-        : "[m/i] type | []] mode queue/steer/interrupt | [↑/↓] scroll | [p] pause [r] resume [x] terminate";
+        : "[m/i] type | mode: ] queue/steer/interrupt | [↑/↓] scroll | [p] pause [r] resume [x] terminate";
     }
-    lines.push(`│ \x1b[2m${footerText}\x1b[0m` + " ".repeat(Math.max(0, width - 4 - footerText.length)) + " │");
+    this.framedWrappedLines(`\x1b[2m${footerText}\x1b[0m`, contentWidth, 2).forEach((row) => lines.push(row));
     lines.push(`└${border}┘`);
 
     return lines;
@@ -813,7 +825,7 @@ function handleAgentEventForTui(tuiState: TuiState | undefined, agentName: strin
       const summaries = Array.isArray(part.summary) ? part.summary.map((s: any) => s?.text).filter(Boolean).join("\n") : "";
       const text = part.text || part.thinking || summaries;
       if (text?.trim()) {
-        const line = `\x1b[2m[Thinking] ${stringifyToolPayload(text, 900)}\x1b[0m`;
+        const line = `\x1b[2m[Thinking] ${text}\x1b[0m`;
         if (ev.type === "message_update") updateTuiLiveLog(tuiState, agentName, "thinking", line, triggerRender, "Thinking...");
         else {
           updateTuiLiveLog(tuiState, agentName, "thinking", line, triggerRender, "Thinking...");
@@ -829,7 +841,7 @@ function handleAgentEventForTui(tuiState: TuiState | undefined, agentName: strin
     } else if (part?.type === "text") {
       const text = part.text || "";
       if (text.trim()) {
-        const line = `\x1b[36m[Response] ${stringifyToolPayload(text, 1000)}\x1b[0m`;
+        const line = `\x1b[36m[Response] ${text}\x1b[0m`;
         if (ev.type === "message_update") updateTuiLiveLog(tuiState, agentName, "response", line, triggerRender, "Responding...");
         else {
           updateTuiLiveLog(tuiState, agentName, "response", line, triggerRender, "Responding...");
