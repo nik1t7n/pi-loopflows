@@ -1,0 +1,60 @@
+{
+  "name": "autobrowse",
+  "version": "1.0.0",
+  "description": "Autonomous browser skill generator: runs tasks, reads execution logs, optimizes strategy, and graduates a durable SKILL.md + JS script.",
+  "backend": "pi-subprocess",
+  "defaults": {
+    "agentScope": "both"
+  },
+  "steps": [
+    {
+      "id": "init",
+      "agent": "planner",
+      "output": "strategy.md",
+      "task": "Create the initial web automation strategy for this task:\n\n{task}\n\nIdentify target URL, required login/cookies state, likely selectors, and extraction steps. Write the first version of strategy.md. Do not write code or run browser yet."
+    },
+    {
+      "loop": {
+        "id": "optimize",
+        "maxIterations": 3,
+        "gateStep": "evaluate",
+        "passStatuses": ["converged"],
+        "retryStatuses": ["improving"],
+        "stopStatuses": ["blocked"],
+        "onExhausted": "stop",
+        "body": [
+          {
+            "id": "generate-script",
+            "agent": "worker",
+            "output": "script-{loop.iteration}.js",
+            "task": "Write or optimize a PandaScript (vanilla JS for Lightpanda) based on strategy:\n\n{outputs.init}\n\nLast iteration evaluation/notes, if any:\n{outputs.evaluate.output}\n\nUse Lightpanda primitives (goto, click, fill, extract). Keep it minimal. Do not use LLM in the output script. Focus on extracting the requested data cleanly."
+          },
+          {
+            "id": "run-trace",
+            "agent": "worker",
+            "output": "run-{loop.iteration}.log",
+            "task": "Execute the script using Lightpanda and capture the full stdout/stderr/network trace.\n\nCommand to run: `lightpanda agent script-{loop.iteration}.js`.\n\nReturn the exact log output and exit code."
+          },
+          {
+            "id": "evaluate",
+            "agent": "reviewer",
+            "output": "evaluation-{loop.iteration}.json",
+            "gate": {
+              "type": "json-status",
+              "passStatuses": ["converged"],
+              "retryStatuses": ["improving"],
+              "stopStatuses": ["blocked"]
+            },
+            "task": "Analyze the run log: {outputs.run-trace.output}.\n\nDid it succeed? Are there redundant clicks, slow waits, or missing elements? Update strategy.md with optimizations.\n\nReturn ONLY valid JSON matching this shape:\n{\n  \"status\": \"converged\" | \"improving\" | \"blocked\",\n  \"unnecessary_steps_removed\": [\"step\"],\n  \"updated_selectors\": [\"selector\"],\n  \"reasoning\": \"short verdict\"\n}"
+          }
+        ]
+      }
+    },
+    {
+      "id": "graduate",
+      "agent": "worker",
+      "output": "SKILL.md",
+      "task": "Autobrowse converged successfully in {loop.iteration} iterations!\n\nRead final strategy: {outputs.evaluate.output}\nAnd final script: {outputs.generate-script.output}\n\nWrite a clean, reusable SKILL.md file. Explain the target site, prerequisites, exact command to run (lightpanda agent <script>), output schema, and expected errors."
+    }
+  ]
+}
