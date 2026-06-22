@@ -104,17 +104,68 @@ type TuiState = {
   activeIteration: number;
   currentStatus: string;
   thoughtsLog: string[];
+  agentLogs: Record<string, string[]>;
+  selectedAgent: string | null;
   viewMode: "general" | "thoughts";
   sequence: StepResult[];
 };
 
+class LoopflowWidget implements Component {
+  private state: TuiState;
+  constructor(state: TuiState) {
+    this.state = state;
+  }
+  render(width: number): string[] {
+    const border = "─".repeat(width - 2);
+    const stepStr = this.state.activeStep || "none";
+    const agentStr = this.state.activeAgent || "none";
+    const iterStr = this.state.activeIteration ? `Iteration: ${this.state.activeIteration}` : "none";
+    
+    const line1 = `Step: ${stepStr} | Agent: ${agentStr} | ${iterStr}`;
+    const line2 = `Status: ${this.state.currentStatus}`;
+    
+    const cleanLine1 = line1.replace(/\x1b\[[0-9;]*m/g, "");
+    const cleanLine2 = line2.replace(/\x1b\[[0-9;]*m/g, "");
+    
+    const lines = [
+      `┌── Loopflow Status: ${this.state.workflowName} ` + "─".repeat(Math.max(0, width - 23 - this.state.workflowName.length)) + "┐",
+      `│ Step: \x1b[32m${stepStr}\x1b[0m | Agent: \x1b[36m${agentStr}\x1b[0m | ${iterStr}` + " ".repeat(Math.max(0, width - 2 - cleanLine1.length)) + "│",
+      `│ Status: \x1b[35m${this.state.currentStatus}\x1b[0m` + " ".repeat(Math.max(0, width - 2 - cleanLine2.length)) + "│",
+      `└` + border + "┘"
+    ];
+    return lines;
+  }
+  invalidate() {}
+}
+
 class LoopflowOverlay implements Component {
   private state: TuiState;
   private onClose: () => void;
+  private selectedAgentIndex: number = 0;
+  private scrollTop: number = 0;
   
   constructor(state: TuiState, onClose: () => void) {
     this.state = state;
     this.onClose = onClose;
+  }
+
+  private wrapText(text: string, width: number): string[] {
+    if (!text) return [""];
+    const lines: string[] = [];
+    let currentLine = "";
+    const words = text.split(" ");
+    for (const word of words) {
+      const cleanWord = word.replace(/\x1b\[[0-9;]*m/g, "");
+      const cleanCurrent = currentLine.replace(/\x1b\[[0-9;]*m/g, "");
+      if (cleanCurrent.length + cleanWord.length + 1 > width) {
+        if (currentLine) lines.push(currentLine);
+        currentLine = word;
+      } else {
+        currentLine = currentLine ? currentLine + " " + word : word;
+      }
+    }
+    if (currentLine) lines.push(currentLine);
+    return lines;
   }
 
   render(width: number): string[] {
@@ -151,7 +202,7 @@ class LoopflowOverlay implements Component {
 
     // Content area
     const contentWidth = width - 4;
-    const maxLines = 12;
+    const maxLines = 14;
     
     if (this.state.viewMode === "general") {
       const mapLines: string[] = [];
@@ -172,24 +223,75 @@ class LoopflowOverlay implements Component {
         lines.push(`│ ${ln}` + " ".repeat(Math.max(0, contentWidth - plainLength)) + " │");
       });
     } else {
-      const logLines = this.state.thoughtsLog.slice(-maxLines);
-      while (logLines.length < maxLines) {
-        logLines.unshift("");
-      }
-      
-      logLines.forEach(ln => {
-        const plainLength = ln.replace(/\x1b\[[0-9;]*m/g, "").length;
-        let displayLine = ln;
-        if (plainLength > contentWidth) {
-          displayLine = ln.slice(0, contentWidth - 3) + "...";
+      // Thoughts mode
+      if (this.state.selectedAgent === null) {
+        // Select agent mode
+        const mapLines: string[] = [];
+        mapLines.push("\x1b[1m=== Select Agent to View Thoughts ===\x1b[0m");
+        
+        // Find unique agents that have run
+        const uniqueAgents = ["global", ...new Set(this.state.sequence.map(s => s.agent).filter(Boolean))];
+        
+        uniqueAgents.forEach((agent, idx) => {
+          const isSelected = idx === this.selectedAgentIndex;
+          const indicator = isSelected ? "\x1b[33m► " : "  ";
+          const highlight = isSelected ? "\x1b[7m" : "";
+          const reset = isSelected ? "\x1b[27m\x1b[0m" : "";
+          const logCount = agent === "global" ? this.state.thoughtsLog.length : (this.state.agentLogs[agent]?.length ?? 0);
+          mapLines.push(`${indicator}${highlight}${agent} (${logCount} events)${reset}`);
+        });
+
+        // Save total unique agents for input handling
+        (this as any)._uniqueAgentsCount = uniqueAgents.length;
+        (this as any)._uniqueAgentsList = uniqueAgents;
+
+        while (mapLines.length < maxLines) {
+          mapLines.push("");
         }
-        const finalPlain = displayLine.replace(/\x1b\[[0-9;]*m/g, "").length;
-        lines.push(`│ ${displayLine}` + " ".repeat(Math.max(0, contentWidth - finalPlain)) + " │");
-      });
+        
+        mapLines.slice(0, maxLines).forEach(ln => {
+          const plainLength = ln.replace(/\x1b\[[0-9;]*m/g, "").length;
+          lines.push(`│ ${ln}` + " ".repeat(Math.max(0, contentWidth - plainLength)) + " │");
+        });
+      } else {
+        // View thoughts of selected agent mode
+        const agentName = this.state.selectedAgent;
+        const rawLogs = agentName === "global" ? this.state.thoughtsLog : (this.state.agentLogs[agentName] ?? []);
+        
+        // Wrap all lines beautifully to the content width
+        const wrappedLogs: string[] = [];
+        rawLogs.forEach(log => {
+          wrappedLogs.push(...this.wrapText(log, contentWidth));
+        });
+
+        // Limit scrolling to valid range
+        const maxScroll = Math.max(0, wrappedLogs.length - maxLines);
+        if (this.scrollTop > maxScroll) this.scrollTop = maxScroll;
+
+        const visibleLogs = wrappedLogs.slice(this.scrollTop, this.scrollTop + maxLines);
+        
+        while (visibleLogs.length < maxLines) {
+          visibleLogs.push("");
+        }
+
+        lines.push(`│ \x1b[1m=== Thoughts of ${agentName} (Scroll: ${this.scrollTop}/${maxScroll}) ===\x1b[0m` + " ".repeat(Math.max(0, contentWidth - 21 - agentName.length - String(this.scrollTop).length - String(maxScroll).length)) + " │");
+        
+        visibleLogs.slice(0, maxLines).forEach(ln => {
+          const plainLength = ln.replace(/\x1b\[[0-9;]*m/g, "").length;
+          lines.push(`│ ${ln}` + " ".repeat(Math.max(0, contentWidth - plainLength)) + " │");
+        });
+      }
     }
 
     lines.push(`├${border}┤`);
-    const footerText = "Press [Tab/1/2] to Toggle View | [Esc/q] to Close";
+    let footerText = "";
+    if (this.state.viewMode === "general") {
+      footerText = "Press [Tab] for Thoughts | [Esc/q] to Close Panel";
+    } else if (this.state.selectedAgent === null) {
+      footerText = "Press [↑/↓] Navigate | [Enter] Select | [Tab] Map";
+    } else {
+      footerText = "Press [↑/↓] Scroll | [b/Esc] Back to List | [Tab] Map";
+    }
     lines.push(`│ \x1b[2m${footerText}\x1b[0m` + " ".repeat(Math.max(0, width - 2 - footerText.length)) + "│");
     lines.push(`└${border}┘`);
 
@@ -197,10 +299,42 @@ class LoopflowOverlay implements Component {
   }
 
   handleInput(data: string) {
-    if (matchesKey(data, Key.escape) || matchesKey(data, "q")) {
+    if (matchesKey(data, Key.escape)) {
+      if (this.state.viewMode === "thoughts" && this.state.selectedAgent !== null) {
+        this.state.selectedAgent = null;
+      } else {
+        this.onClose();
+      }
+    } else if (matchesKey(data, "q")) {
       this.onClose();
+    } else if (matchesKey(data, "b")) {
+      if (this.state.viewMode === "thoughts" && this.state.selectedAgent !== null) {
+        this.state.selectedAgent = null;
+      }
     } else if (matchesKey(data, Key.tab) || matchesKey(data, "1") || matchesKey(data, "2")) {
       this.state.viewMode = this.state.viewMode === "general" ? "thoughts" : "general";
+    } else if (this.state.viewMode === "thoughts") {
+      if (this.state.selectedAgent === null) {
+        const count = (this as any)._uniqueAgentsCount ?? 0;
+        const list = (this as any)._uniqueAgentsList ?? [];
+        if (matchesKey(data, Key.up)) {
+          this.selectedAgentIndex = Math.max(0, this.selectedAgentIndex - 1);
+        } else if (matchesKey(data, Key.down)) {
+          this.selectedAgentIndex = Math.min(count - 1, this.selectedAgentIndex + 1);
+        } else if (matchesKey(data, Key.enter)) {
+          if (list[this.selectedAgentIndex]) {
+            this.state.selectedAgent = list[this.selectedAgentIndex];
+            this.scrollTop = 9999; // Scroll to bottom initially
+          }
+        }
+      } else {
+        // Scroll thoughts
+        if (matchesKey(data, Key.up)) {
+          this.scrollTop = Math.max(0, this.scrollTop - 1);
+        } else if (matchesKey(data, Key.down)) {
+          this.scrollTop = this.scrollTop + 1;
+        }
+      }
     }
   }
 
@@ -844,6 +978,10 @@ async function runLoop(loop: LoopDef, ctx: RunContext, adapter: ExecutorAdapter,
   return lastGate ?? { id: loop.id, agent: "loop", output: "Loop had no gate result", exitCode: 1 };
 }
 
+let activeTuiState: TuiState | undefined = undefined;
+let activeUiHandle: any = undefined;
+let activeExtensionCtx: any = undefined;
+
 async function runWorkflow(workflow: WorkflowDef, task: string, opts: { cwd: string; signal?: AbortSignal; params?: Record<string, any>; maxIterations?: number; extensionCtx?: any }) {
   const adapter = new PiSubprocessAdapter();
   const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${safeName(workflow.name)}`;
@@ -863,20 +1001,22 @@ async function runWorkflow(workflow: WorkflowDef, task: string, opts: { cwd: str
     activeIteration: 0,
     currentStatus: "Starting workflow...",
     thoughtsLog: ["[Workflow] Initialized."],
+    agentLogs: {},
+    selectedAgent: null,
     viewMode: "general",
     sequence: []
   } : undefined;
+
+  activeTuiState = tuiState;
+  activeExtensionCtx = opts.extensionCtx;
 
   let uiHandle: any = undefined;
   const updateWidget = () => {
     if (!opts.extensionCtx || !tuiState) return;
     try {
-      opts.extensionCtx.ui.setWidget("loopflow-status", [
-        `┌── Loopflow Status: ${tuiState.workflowName} ──┐`,
-        `│ Step: \x1b[32m${tuiState.activeStep || "none"}\x1b[0m | Agent: \x1b[36m${tuiState.activeAgent || "none"}\x1b[0m | Iteration: ${tuiState.activeIteration || "none"}`,
-        `│ Status: \x1b[35m${tuiState.currentStatus}\x1b[0m`,
-        `└──────────────────────────────────────┘`
-      ]);
+      opts.extensionCtx.ui.setWidget("loopflow-status", (tui: any, theme: any) => {
+        return new LoopflowWidget(tuiState);
+      });
     } catch {
       // Ignore
     }
@@ -884,6 +1024,7 @@ async function runWorkflow(workflow: WorkflowDef, task: string, opts: { cwd: str
 
   const triggerRender = () => {
     uiHandle?.requestRender?.();
+    activeUiHandle?.requestRender?.();
     updateWidget();
   };
 
@@ -891,16 +1032,21 @@ async function runWorkflow(workflow: WorkflowDef, task: string, opts: { cwd: str
     try {
       updateWidget();
       uiHandle = opts.extensionCtx.ui.custom((tui: any, theme: any, keybindings: any, done: any) => {
-        return new LoopflowOverlay(tuiState, done);
+        return new LoopflowOverlay(tuiState, () => {
+          done();
+          uiHandle = undefined;
+          activeUiHandle = undefined;
+        });
       }, {
         overlay: true,
         overlayOptions: {
-          width: "40%",
+          width: "45%",
           anchor: "right-center",
           margin: 1
         },
         onHandle: (h: any) => {
           uiHandle = h;
+          activeUiHandle = h;
         }
       });
     } catch {
@@ -926,16 +1072,22 @@ async function runWorkflow(workflow: WorkflowDef, task: string, opts: { cwd: str
 
       const onAgentEvent = (ev: any) => {
         if (!tuiState) return;
+        const agentName = node.agent;
+        if (!tuiState.agentLogs[agentName]) tuiState.agentLogs[agentName] = [];
+        
         if (ev.type === "thinking" && ev.text) {
           tuiState.thoughtsLog.push(`[Thinking] ${ev.text}`);
+          tuiState.agentLogs[agentName].push(`[Thinking] ${ev.text}`);
           tuiState.currentStatus = `Thinking...`;
           triggerRender();
         } else if (ev.type === "tool_call" && ev.toolCall) {
           tuiState.thoughtsLog.push(`[Tool Call] ${ev.toolCall.name}`);
+          tuiState.agentLogs[agentName].push(`[Tool Call] ${ev.toolCall.name}`);
           tuiState.currentStatus = `Calling tool: ${ev.toolCall.name}`;
           triggerRender();
         } else if (ev.type === "tool_result" && ev.toolCall) {
           tuiState.thoughtsLog.push(`[Tool Result] ${ev.toolCall.name} completed.`);
+          tuiState.agentLogs[agentName].push(`[Tool Result] ${ev.toolCall.name} completed.`);
           triggerRender();
         }
       };
@@ -957,10 +1109,14 @@ async function runWorkflow(workflow: WorkflowDef, task: string, opts: { cwd: str
     try {
       opts.extensionCtx.ui.setWidget("loopflow-status", undefined);
       uiHandle?.close?.();
+      activeUiHandle?.close?.();
     } catch {
       // Ignore
     }
   }
+
+  activeTuiState = undefined;
+  activeUiHandle = undefined;
 
   const summary = [
     `# Loopflow run: ${workflow.name}`,
@@ -1009,6 +1165,48 @@ export default function (pi: ExtensionAPI) {
       const lines = [...workflows.values()].map(({ file, workflow }) => `- ${workflow.name}: ${workflow.description ?? ""}\n  ${file}`);
       ctx.ui.notify(lines.length ? lines.join("\n") : "No loopflows found", "info");
     },
+  });
+
+  pi.registerCommand("loopflow-monitor", {
+    description: "Reopen the active loopflow monitor panel",
+    handler: async (_args, ctx) => {
+      if (!activeTuiState) {
+        ctx.ui.notify("No active loopflow is currently running.", "error");
+        return;
+      }
+      if (activeUiHandle) {
+        // Bring to front
+        activeUiHandle.focus?.();
+        return;
+      }
+      try {
+        activeUiHandle = ctx.ui.custom((tui: any, theme: any, keybindings: any, done: any) => {
+          return new LoopflowOverlay(activeTuiState!, () => {
+            done();
+            activeUiHandle = undefined;
+          });
+        }, {
+          overlay: true,
+          overlayOptions: {
+            width: "45%",
+            anchor: "right-center",
+            margin: 1
+          },
+          onHandle: (h: any) => {
+            activeUiHandle = h;
+          }
+        });
+      } catch {
+        ctx.ui.notify("Failed to reopen monitor panel.", "error");
+      }
+    },
+  });
+
+  pi.registerShortcut("ctrl+shift+l", {
+    description: "Toggle Loopflow Monitor Panel",
+    handler: async (ctx) => {
+      await ctx.ui.pasteToEditor("/loopflow-monitor\n");
+    }
   });
 
   pi.registerCommand("loopflow", {
