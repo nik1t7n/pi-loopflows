@@ -219,11 +219,34 @@ class LoopflowOverlay implements Component {
   private scrollTop: number = 0;
   private autoFollow: boolean = true;
   private lastDownAt: number = 0;
+  private composing: boolean = false;
+  private composeText: string = "";
   
   constructor(state: TuiState, onClose: () => void, extensionCtx?: any) {
     this.state = state;
     this.onClose = onClose;
     this.extensionCtx = extensionCtx;
+  }
+
+  private requestRender() {
+    activeUiHandle?.requestRender?.();
+  }
+
+  private isPrintable(data: string): boolean {
+    return data.length === 1 && data >= " " && data !== "\x7f";
+  }
+
+  private submitInlineMessage() {
+    const agent = this.state.selectedAgent && this.state.selectedAgent !== "global" ? this.state.selectedAgent : this.state.activeAgent;
+    const text = this.composeText.trim();
+    if (!agent || !text) return;
+    const ok = queueAgentMessage(agent, text, "overlay-inline");
+    this.extensionCtx?.ui?.notify?.(ok ? `Queued message for ${agent}` : "No active/paused loopflow.", ok ? "info" : "error");
+    this.composeText = "";
+    this.composing = false;
+    this.autoFollow = true;
+    this.scrollTop = 999999;
+    this.requestRender();
   }
 
   private ansiWordWrap(text: string, maxWidth: number): string[] {
@@ -311,7 +334,8 @@ class LoopflowOverlay implements Component {
 
     // Content area
     const contentWidth = width - 4;
-    const maxLines = 14;
+    const isAgentDetail = this.state.viewMode === "thoughts" && this.state.selectedAgent !== null;
+    const maxLines = isAgentDetail ? 13 : 14;
     
     if (this.state.viewMode === "general") {
       const mapLines: string[] = [];
@@ -399,13 +423,25 @@ class LoopflowOverlay implements Component {
     }
 
     lines.push(`├${border}┤`);
+    if (isAgentDetail) {
+      const agentName = this.state.selectedAgent || this.state.activeAgent || "agent";
+      const promptPrefix = this.composing ? `Message ${agentName}: ` : `Message ${agentName}: `;
+      const cursor = this.composing ? "▌" : "";
+      const inputText = this.composing ? this.composeText : "press m/i to type here";
+      const styledInput = `${promptPrefix}${this.composing ? "\x1b[37m" : "\x1b[2m"}${inputText}${cursor}\x1b[0m`;
+      const plainLength = `${promptPrefix}${inputText}${cursor}`.length;
+      lines.push(`│ ${styledInput}` + " ".repeat(Math.max(0, contentWidth - plainLength)) + " │");
+      lines.push(`├${border}┤`);
+    }
     let footerText = "";
     if (this.state.viewMode === "general") {
       footerText = "Press [→] for Thoughts | [Esc/q] to Close Panel";
     } else if (this.state.selectedAgent === null) {
       footerText = "Press [↑/↓] Navigate | [←] Map | [Enter] Select | [Esc/q] Close";
     } else {
-      footerText = "[↑] pause+scroll | double [↓] bottom | [p] pause [r] resume [x] terminate [m] msg";
+      footerText = this.composing
+        ? "Type message here | [Enter] send | [Esc] cancel | [Backspace] delete"
+        : "[m/i] focus msg bar | [↑] scroll | double [↓] bottom | [p] pause [r] resume [x] terminate";
     }
     lines.push(`│ \x1b[2m${footerText}\x1b[0m` + " ".repeat(Math.max(0, width - 4 - footerText.length)) + " │");
     lines.push(`└${border}┘`);
@@ -414,6 +450,42 @@ class LoopflowOverlay implements Component {
   }
 
   handleInput(data: string) {
+    if (this.composing) {
+      if (matchesKey(data, Key.escape)) {
+        this.composing = false;
+        this.composeText = "";
+        this.requestRender();
+        return;
+      }
+      if (matchesKey(data, Key.enter) || data === "\r" || data === "\n") {
+        this.submitInlineMessage();
+        return;
+      }
+      if (data === "\x7f" || data === "\b" || data === "\x08") {
+        this.composeText = this.composeText.slice(0, -1);
+        this.requestRender();
+        return;
+      }
+      if (data === "\x15") {
+        this.composeText = "";
+        this.requestRender();
+        return;
+      }
+      if (this.isPrintable(data)) {
+        this.composeText += data;
+        this.requestRender();
+        return;
+      }
+      if (!data.includes("\x1b") && data.length > 1) {
+        const printable = [...data].filter((ch) => ch >= " " && ch !== "\x7f").join("");
+        if (printable) {
+          this.composeText += printable;
+          this.requestRender();
+        }
+      }
+      return;
+    }
+
     if (matchesKey(data, Key.escape)) {
       if (this.state.viewMode === "thoughts" && this.state.selectedAgent !== null) {
         this.state.selectedAgent = null;
@@ -430,15 +502,16 @@ class LoopflowOverlay implements Component {
     } else if (matchesKey(data, "x")) {
       const ok = requestTerminateActiveRun("Terminated from loopflow overlay");
       this.extensionCtx?.ui?.notify?.(ok ? "Loopflow terminate requested." : "No active loopflow to terminate.", ok ? "warning" : "error");
-    } else if (matchesKey(data, "m")) {
-      const agent = this.state.selectedAgent && this.state.selectedAgent !== "global" ? this.state.selectedAgent : (this.state.activeAgent || "worker");
-      void (async () => {
-        const text = await this.extensionCtx?.ui?.input?.(`Message ${agent}:`, "tweak/instruction");
-        if (text?.trim()) {
-          const ok = queueAgentMessage(agent, text.trim(), "overlay");
-          this.extensionCtx?.ui?.notify?.(ok ? `Queued message for ${agent}` : "No active/paused loopflow.", ok ? "info" : "error");
-        }
-      })();
+    } else if (matchesKey(data, "m") || matchesKey(data, "i")) {
+      if (this.state.viewMode === "thoughts" && this.state.selectedAgent !== null && this.state.selectedAgent !== "global") {
+        this.composing = true;
+        this.composeText = "";
+        this.autoFollow = true;
+        this.scrollTop = 999999;
+        this.requestRender();
+      } else {
+        this.extensionCtx?.ui?.notify?.("Select a concrete agent first, then press m/i to message it.", "warning");
+      }
     } else if (matchesKey(data, "b")) {
       if (this.state.viewMode === "thoughts" && this.state.selectedAgent !== null) {
         this.state.selectedAgent = null;
