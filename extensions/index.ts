@@ -174,6 +174,8 @@ class LoopflowOverlay implements Component {
   private onClose: () => void;
   private selectedAgentIndex: number = 0;
   private scrollTop: number = 0;
+  private autoFollow: boolean = true;
+  private lastDownAt: number = 0;
   
   constructor(state: TuiState, onClose: () => void) {
     this.state = state;
@@ -328,9 +330,11 @@ class LoopflowOverlay implements Component {
           wrappedLogs.push(...this.ansiWordWrap(log, contentWidth));
         });
 
-        // Limit scrolling to valid range
+        // Limit scrolling to valid range and magnet-follow live stream when enabled.
         const maxScroll = Math.max(0, wrappedLogs.length - maxLines);
+        if (this.autoFollow) this.scrollTop = maxScroll;
         if (this.scrollTop > maxScroll) this.scrollTop = maxScroll;
+        if (this.scrollTop < 0) this.scrollTop = 0;
 
         const visibleLogs = wrappedLogs.slice(this.scrollTop, this.scrollTop + maxLines);
         
@@ -338,7 +342,8 @@ class LoopflowOverlay implements Component {
           visibleLogs.push("");
         }
 
-        const titleHeader = `=== Thoughts of ${agentName} (Scroll: ${this.scrollTop}/${maxScroll}) ===`;
+        const followBadge = this.autoFollow ? " | follow:on" : " | follow:off";
+        const titleHeader = `=== Thoughts of ${agentName} (Scroll: ${this.scrollTop}/${maxScroll}${followBadge}) ===`;
         const cleanHeader = titleHeader.replace(/\x1b\[[0-9;]*m/g, "").length;
         lines.push(`│ \x1b[1m${titleHeader}\x1b[0m` + " ".repeat(Math.max(0, contentWidth - cleanHeader)) + " │");
         
@@ -356,7 +361,7 @@ class LoopflowOverlay implements Component {
     } else if (this.state.selectedAgent === null) {
       footerText = "Press [↑/↓] Navigate | [←] Map | [Enter] Select | [Esc/q] Close";
     } else {
-      footerText = "Press [↑/↓] Scroll | [←/b/Esc] Back to List | [Tab] Map";
+      footerText = "[↑] pause+scroll | [↓] scroll | double [↓] bottom+follow | [←/b/Esc] Back";
     }
     lines.push(`│ \x1b[2m${footerText}\x1b[0m` + " ".repeat(Math.max(0, width - 4 - footerText.length)) + " │");
     lines.push(`└${border}┘`);
@@ -404,15 +409,24 @@ class LoopflowOverlay implements Component {
         } else if (matchesKey(data, Key.enter)) {
           if (list[this.selectedAgentIndex]) {
             this.state.selectedAgent = list[this.selectedAgentIndex];
+            this.autoFollow = true;
             this.scrollTop = 9999; // Scroll to bottom initially
           }
         }
       } else {
         // Scroll thoughts
         if (matchesKey(data, Key.up)) {
+          this.autoFollow = false;
           this.scrollTop = Math.max(0, this.scrollTop - 1);
         } else if (matchesKey(data, Key.down)) {
-          this.scrollTop = this.scrollTop + 1;
+          const now = Date.now();
+          if (now - this.lastDownAt < 350) {
+            this.autoFollow = true;
+            this.scrollTop = 999999;
+          } else {
+            this.scrollTop = this.scrollTop + 1;
+          }
+          this.lastDownAt = now;
         }
       }
     }
@@ -568,7 +582,7 @@ function maybeAppendSpacer(lines: string[]) {
   if (lines.length > 0 && lines[lines.length - 1] !== "") lines.push("");
 }
 
-function appendTuiEventLog(tuiState: TuiState, agentName: string, logStr: string, triggerRender?: () => void, status?: string, block = false) {
+function appendTuiEventLog(tuiState: TuiState, agentName: string, logStr: string, triggerRender?: () => void, status?: string, block = true) {
   if (!tuiState.agentLogs[agentName]) tuiState.agentLogs[agentName] = [];
   if (block) {
     maybeAppendSpacer(tuiState.thoughtsLog);
@@ -589,6 +603,8 @@ function updateTuiLiveLog(tuiState: TuiState, agentName: string, key: string, lo
     tuiState.thoughtsLog[existing.global] = logStr;
     tuiState.agentLogs[agentName][existing.agent] = logStr;
   } else {
+    maybeAppendSpacer(tuiState.thoughtsLog);
+    maybeAppendSpacer(tuiState.agentLogs[agentName]);
     tuiState.thoughtsLog.push(logStr);
     tuiState.agentLogs[agentName].push(logStr);
     tuiState.liveLogIndexes[liveKey] = {
@@ -1086,8 +1102,7 @@ async function runOMCompression(
       tuiState.activeStep = "OM Observer";
       tuiState.activeAgent = observerAgent;
       tuiState.currentStatus = "Compressing past iterations' raw logs...";
-      tuiState.thoughtsLog.push("[Observer] Compression triggered due to limit.");
-      triggerRender?.();
+      appendTuiEventLog(tuiState, observerAgent, "[Observer] Compression triggered due to limit.", triggerRender, "Compressing past iterations' raw logs...");
     }
 
     const rawLogToObserve = unobservedSteps.map(step => {
@@ -1156,8 +1171,7 @@ Your response must strictly follow this format:
         debugLines.push(`Parsed observations count: ${estimateTokens(parsed.observations)} tokens`);
         
         if (tuiState) {
-          tuiState.thoughtsLog.push("[Observer] Compression completed successfully.");
-          triggerRender?.();
+          appendTuiEventLog(tuiState, observerAgent, "[Observer] Compression completed successfully.", triggerRender);
         }
 
         // Context Swapping: Prune observed steps' outputs to save tokens
@@ -1218,8 +1232,7 @@ Compress and reflect on these observations strictly matching the specified forma
         tuiState.activeStep = "OM Reflector";
         tuiState.activeAgent = reflectorAgentName;
         tuiState.currentStatus = "Consolidating observations into reflections...";
-        tuiState.thoughtsLog.push("[Reflector] Reflection triggered due to threshold.");
-        triggerRender?.();
+        appendTuiEventLog(tuiState, reflectorAgentName, "[Reflector] Reflection triggered due to threshold.", triggerRender, "Consolidating observations into reflections...");
       }
 
       try {
@@ -1237,8 +1250,7 @@ Compress and reflect on these observations strictly matching the specified forma
           ctx.params.observations = "Consolidated into reflections.\n\n" + (ctx.params.observations.slice(-4000));
           
           if (tuiState) {
-            tuiState.thoughtsLog.push("[Reflector] Reflection completed successfully.");
-            triggerRender?.();
+            appendTuiEventLog(tuiState, reflectorAgentName, "[Reflector] Reflection completed successfully.", triggerRender);
           }
 
           await saveArtifact(ctx, `om-reflections-${currentIteration}.md`, ctx.params.reflections);
@@ -1275,9 +1287,7 @@ async function runLoop(loop: LoopDef, ctx: RunContext, adapter: ExecutorAdapter,
         tuiState.sequence = [...ctx.sequence];
         if (!tuiState.agentLogs[step.agent]) tuiState.agentLogs[step.agent] = [];
         const startLog = `[Workflow] Starting step: ${step.id} (Iteration: ${i})`;
-        tuiState.thoughtsLog.push(startLog);
-        tuiState.agentLogs[step.agent].push(startLog);
-        triggerRender?.();
+        appendTuiEventLog(tuiState, step.agent, startLog, triggerRender, `Running agent ${step.agent}...`);
       }
 
       const stepWithGate = step.id === loop.gateStep && !step.gate ? { ...step, gate: { type: "json-status" as const } } : step;
@@ -1292,10 +1302,7 @@ async function runLoop(loop: LoopDef, ctx: RunContext, adapter: ExecutorAdapter,
       if (tuiState) {
         tuiState.sequence = [...ctx.sequence];
         const completedLog = `[Workflow] Completed step: ${step.id} (Exit Code: ${result.exitCode})`;
-        tuiState.thoughtsLog.push(completedLog);
-        if (!tuiState.agentLogs[step.agent]) tuiState.agentLogs[step.agent] = [];
-        tuiState.agentLogs[step.agent].push(completedLog);
-        triggerRender?.();
+        appendTuiEventLog(tuiState, step.agent, completedLog, triggerRender);
       }
 
       if (result.exitCode !== 0) return result;
@@ -1409,9 +1416,7 @@ async function runWorkflow(workflow: WorkflowDef, task: string, opts: { cwd: str
         tuiState.currentStatus = `Running agent ${node.agent}...`;
         if (!tuiState.agentLogs[node.agent]) tuiState.agentLogs[node.agent] = [];
         const startLog = `[Workflow] Starting step: ${node.id}`;
-        tuiState.thoughtsLog.push(startLog);
-        tuiState.agentLogs[node.agent].push(startLog);
-        triggerRender();
+        appendTuiEventLog(tuiState, node.agent, startLog, triggerRender, `Running agent ${node.agent}...`);
       }
 
       const onAgentEvent = (ev: any) => {
@@ -1423,10 +1428,7 @@ async function runWorkflow(workflow: WorkflowDef, task: string, opts: { cwd: str
       if (tuiState) {
         tuiState.sequence = [...ctx.sequence];
         const completedLog = `[Workflow] Completed step: ${node.id} (Exit Code: ${result.exitCode})`;
-        tuiState.thoughtsLog.push(completedLog);
-        if (!tuiState.agentLogs[node.agent]) tuiState.agentLogs[node.agent] = [];
-        tuiState.agentLogs[node.agent].push(completedLog);
-        triggerRender();
+        appendTuiEventLog(tuiState, node.agent, completedLog, triggerRender);
       }
 
       if (result.exitCode !== 0) {
