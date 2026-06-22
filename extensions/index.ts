@@ -222,6 +222,9 @@ class LoopflowOverlay implements Component {
   private scrollTop: number = 0;
   private autoFollow: boolean = true;
   private lastDownAt: number = 0;
+  private lastScrollKey: "up" | "down" | null = null;
+  private lastScrollAt: number = 0;
+  private scrollRepeatCount: number = 0;
   private composing: boolean = false;
   private composeText: string = "";
   private messageMode: DeliveryMode = "steer";
@@ -238,6 +241,22 @@ class LoopflowOverlay implements Component {
 
   private isPrintable(data: string): boolean {
     return data.length === 1 && data >= " " && data !== "\x7f";
+  }
+
+  private acceleratedScrollStep(direction: "up" | "down"): number {
+    const now = Date.now();
+    if (this.lastScrollKey === direction && now - this.lastScrollAt < 220) {
+      this.scrollRepeatCount++;
+    } else {
+      this.scrollRepeatCount = 0;
+    }
+    this.lastScrollKey = direction;
+    this.lastScrollAt = now;
+    if (this.scrollRepeatCount > 30) return 12;
+    if (this.scrollRepeatCount > 18) return 8;
+    if (this.scrollRepeatCount > 10) return 5;
+    if (this.scrollRepeatCount > 4) return 3;
+    return 1;
   }
 
   private submitInlineMessage() {
@@ -571,14 +590,15 @@ class LoopflowOverlay implements Component {
         // Scroll thoughts
         if (matchesKey(data, Key.up)) {
           this.autoFollow = false;
-          this.scrollTop = Math.max(0, this.scrollTop - 1);
+          this.scrollTop = Math.max(0, this.scrollTop - this.acceleratedScrollStep("up"));
         } else if (matchesKey(data, Key.down)) {
           const now = Date.now();
           if (now - this.lastDownAt < 350) {
             this.autoFollow = true;
             this.scrollTop = 999999;
+            this.scrollRepeatCount = 0;
           } else {
-            this.scrollTop = this.scrollTop + 1;
+            this.scrollTop = this.scrollTop + this.acceleratedScrollStep("down");
           }
           this.lastDownAt = now;
         }
