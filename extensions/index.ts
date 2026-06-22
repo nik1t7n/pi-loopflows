@@ -1309,9 +1309,16 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(`Unknown loopflow ${name}. Available: ${[...workflows.keys()].join(", ") || "none"}`, "error");
         return;
       }
-      ctx.ui.notify(`Running loopflow ${name}`, "info");
-      const result = await runWorkflow(found.workflow, task, { cwd: ctx.cwd, extensionCtx: ctx });
-      pi.sendMessage({ customType: "loopflow-result", content: result.summary, display: true, details: result }, { triggerTurn: false });
+      ctx.ui.notify(`Running loopflow ${name} in background`, "info");
+      
+      // Run asynchronously in the background to prevent blocking the TUI
+      runWorkflow(found.workflow, task, { cwd: ctx.cwd, extensionCtx: ctx })
+        .then((result) => {
+          pi.sendMessage({ customType: "loopflow-result", content: result.summary, display: true, details: result }, { triggerTurn: false });
+        })
+        .catch((err) => {
+          ctx.ui.notify(`Loopflow '${name}' failed: ${err?.message || err}`, "error");
+        });
     },
   });
 }
