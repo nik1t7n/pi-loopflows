@@ -120,12 +120,15 @@ class LoopflowWidget implements Component {
     const agentStr = this.state.activeAgent || "none";
     const iterStr = this.state.activeIteration ? `Iteration: ${this.state.activeIteration}` : "none";
     
-    const lines = [
-      `\x1b[1m\x1b[33m● Loopflow Status: ${this.state.workflowName}\x1b[0m`,
-      `  Step: \x1b[32m${stepStr}\x1b[0m | Agent: \x1b[36m${agentStr}\x1b[0m | ${iterStr}`,
-      `  Status: \x1b[35m${this.state.currentStatus}\x1b[0m`
-    ];
-    return lines;
+    const titleText = `● Loopflow Status: ${this.state.workflowName}`;
+    const cleanTitle = titleText.replace(/\x1b\[[0-9;]*m/g, "");
+    const headerLine = `\x1b[2m───\x1b[0m \x1b[1m\x1b[33m●\x1b[0m \x1b[1mLoopflow Status: ${this.state.workflowName}\x1b[0m \x1b[2m` + "─".repeat(Math.max(0, width - 6 - cleanTitle.length)) + "\x1b[0m";
+    
+    const detailText = `  Step: \x1b[32m${stepStr}\x1b[0m | Agent: \x1b[36m${agentStr}\x1b[0m | ${iterStr}  |  \x1b[2m${this.state.currentStatus}\x1b[0m`;
+    const cleanDetail = detailText.replace(/\x1b\[[0-9;]*m/g, "");
+    const detailLine = detailText + " ".repeat(Math.max(0, width - cleanDetail.length));
+    
+    return [headerLine, detailLine];
   }
   invalidate() {}
 }
