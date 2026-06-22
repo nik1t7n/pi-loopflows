@@ -1222,6 +1222,14 @@ const RunParams = Type.Object({
 });
 
 export default function (pi: ExtensionAPI) {
+  pi.on("agent_start", (event, ctx) => {
+    try {
+      ctx.ui.setWidget("loopflow-status", undefined);
+    } catch {
+      // Ignore
+    }
+  });
+
   pi.registerTool({
     name: "loopflow_run",
     label: "Loopflow Run",
