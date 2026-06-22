@@ -1068,7 +1068,10 @@ async function runLoop(loop: LoopDef, ctx: RunContext, adapter: ExecutorAdapter,
         tuiState.activeIteration = i;
         tuiState.currentStatus = `Running agent ${step.agent}...`;
         tuiState.sequence = [...ctx.sequence];
-        tuiState.thoughtsLog.push(`[Workflow] Starting step: ${step.id} (Iteration: ${i})`);
+        if (!tuiState.agentLogs[step.agent]) tuiState.agentLogs[step.agent] = [];
+        const startLog = `[Workflow] Starting step: ${step.id} (Iteration: ${i})`;
+        tuiState.thoughtsLog.push(startLog);
+        tuiState.agentLogs[step.agent].push(startLog);
         triggerRender?.();
       }
 
@@ -1144,7 +1147,10 @@ async function runLoop(loop: LoopDef, ctx: RunContext, adapter: ExecutorAdapter,
       
       if (tuiState) {
         tuiState.sequence = [...ctx.sequence];
-        tuiState.thoughtsLog.push(`[Workflow] Completed step: ${step.id} (Exit Code: ${result.exitCode})`);
+        const completedLog = `[Workflow] Completed step: ${step.id} (Exit Code: ${result.exitCode})`;
+        tuiState.thoughtsLog.push(completedLog);
+        if (!tuiState.agentLogs[step.agent]) tuiState.agentLogs[step.agent] = [];
+        tuiState.agentLogs[step.agent].push(completedLog);
         triggerRender?.();
       }
 
@@ -1257,7 +1263,10 @@ async function runWorkflow(workflow: WorkflowDef, task: string, opts: { cwd: str
         tuiState.activeAgent = node.agent;
         tuiState.activeIteration = 0;
         tuiState.currentStatus = `Running agent ${node.agent}...`;
-        tuiState.thoughtsLog.push(`[Workflow] Starting step: ${node.id}`);
+        if (!tuiState.agentLogs[node.agent]) tuiState.agentLogs[node.agent] = [];
+        const startLog = `[Workflow] Starting step: ${node.id}`;
+        tuiState.thoughtsLog.push(startLog);
+        tuiState.agentLogs[node.agent].push(startLog);
         triggerRender();
       }
 
@@ -1287,7 +1296,10 @@ async function runWorkflow(workflow: WorkflowDef, task: string, opts: { cwd: str
       
       if (tuiState) {
         tuiState.sequence = [...ctx.sequence];
-        tuiState.thoughtsLog.push(`[Workflow] Completed step: ${node.id} (Exit Code: ${result.exitCode})`);
+        const completedLog = `[Workflow] Completed step: ${node.id} (Exit Code: ${result.exitCode})`;
+        tuiState.thoughtsLog.push(completedLog);
+        if (!tuiState.agentLogs[node.agent]) tuiState.agentLogs[node.agent] = [];
+        tuiState.agentLogs[node.agent].push(completedLog);
         triggerRender();
       }
 
