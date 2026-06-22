@@ -750,6 +750,15 @@ function parseObserverOutput(output: string) {
 async function runStep(def: StepDef, ctx: RunContext, adapter: ExecutorAdapter, scope: "user" | "project" | "both", signal: AbortSignal | undefined, iteration?: number, onAgentEvent?: (event: any) => void): Promise<StepResult> {
   let task = renderTemplate(def.task, ctx, iteration);
   
+  // Natively inject Observational Memory if active but not explicitly placed in template
+  const hasObservationsPlaceholder = def.task.includes("{loop.observations}");
+  if (!hasObservationsPlaceholder && ctx.params.observations) {
+    task += `\n\n=== Loop Execution History (Observational Memory) ===\n${ctx.params.observations}`;
+    if (ctx.params.reflections) {
+      task += `\n\n=== High-Level Reflections ===\n${ctx.params.reflections}`;
+    }
+  }
+
   // Auto-inject agentmemory context (CLI-first via API)
   const memoryContext = await queryAgentMemory(task, ctx.cwd);
   if (memoryContext) {
@@ -998,8 +1007,9 @@ async function runLoop(loop: LoopDef, ctx: RunContext, adapter: ExecutorAdapter,
   const max = Math.max(1, loop.maxIterations);
   let lastGate: StepResult | undefined;
   for (let i = 1; i <= max; i++) {
-    // Run Observational Memory compression if enabled
-    if (i > 1 && loop.memory?.observational) {
+    // Run Observational Memory compression by default (unless explicitly set to false)
+    const isObservational = loop.memory?.observational !== false;
+    if (i > 1 && isObservational) {
       await runOMCompression(loop, ctx, adapter, scope, signal, i, tuiState, triggerRender);
     }
 
