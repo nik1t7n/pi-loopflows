@@ -350,11 +350,11 @@ class LoopflowOverlay implements Component {
     lines.push(`├${border}┤`);
     let footerText = "";
     if (this.state.viewMode === "general") {
-      footerText = "Press [Tab] for Thoughts | [Esc/q] to Close Panel";
+      footerText = "Press [→] for Thoughts | [Esc/q] to Close Panel";
     } else if (this.state.selectedAgent === null) {
-      footerText = "Press [↑/↓] Navigate | [Enter] Select | [Tab] Map";
+      footerText = "Press [↑/↓] Navigate | [←] Map | [Enter] Select | [Esc/q] Close";
     } else {
-      footerText = "Press [↑/↓] Scroll | [b/Esc] Back to List | [Tab] Map";
+      footerText = "Press [↑/↓] Scroll | [←/b/Esc] Back to List | [Tab] Map";
     }
     lines.push(`│ \x1b[2m${footerText}\x1b[0m` + " ".repeat(Math.max(0, width - 4 - footerText.length)) + " │");
     lines.push(`└${border}┘`);
@@ -375,8 +375,22 @@ class LoopflowOverlay implements Component {
       if (this.state.viewMode === "thoughts" && this.state.selectedAgent !== null) {
         this.state.selectedAgent = null;
       }
-    } else if (matchesKey(data, Key.tab) || matchesKey(data, "1") || matchesKey(data, "2")) {
-      this.state.viewMode = this.state.viewMode === "general" ? "thoughts" : "general";
+    } else if (matchesKey(data, Key.tab) || matchesKey(data, "1")) {
+      this.state.viewMode = "general";
+    } else if (matchesKey(data, "2")) {
+      this.state.viewMode = "thoughts";
+    } else if (matchesKey(data, Key.right)) {
+      if (this.state.viewMode === "general") {
+        this.state.viewMode = "thoughts";
+      }
+    } else if (matchesKey(data, Key.left)) {
+      if (this.state.viewMode === "thoughts") {
+        if (this.state.selectedAgent !== null) {
+          this.state.selectedAgent = null;
+        } else {
+          this.state.viewMode = "general";
+        }
+      }
     } else if (this.state.viewMode === "thoughts") {
       if (this.state.selectedAgent === null) {
         const count = (this as any)._uniqueAgentsCount ?? 0;
