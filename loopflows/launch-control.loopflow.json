@@ -10,14 +10,14 @@
     {
       "id": "context",
       "agent": "context-builder",
-      "tools": ["read", "grep", "find", "ls", "bash"],
+      "tools": ["read", "ls", "bash"],
       "output": "context.md",
-      "task": "Build concise launch-control execution context for this task:\n\n{task}\n\nRead any provided plan/spec path, inspect the repository enough to identify relevant files, acceptance criteria, validation commands, risks, missing inputs, and stop conditions. Do not edit files. Return compact handoff context with: scope, likely files, validation contract candidates, explicit unknowns, and stop conditions."
+      "task": "Build concise launch-control execution context for this task:\n\n{task}\n\nRead any provided plan/spec path if one is explicitly named. For new standalone folder/project tasks, do NOT grep/find/scan the whole workspace; only check whether the target path exists, list the immediate parent directory if needed, and inspect environment versions needed for validation. Always ignore .pi, previous loopflow runs, node_modules, .venv, caches, and unrelated projects. Do not edit files. Return compact handoff context with: scope, likely files, validation contract candidates, explicit unknowns, and stop conditions."
     },
     {
       "id": "plan",
       "agent": "planner",
-      "tools": ["read", "grep", "find", "ls"],
+      "tools": ["read", "ls"],
       "output": "block-plan.md",
       "task": "Create the smallest safe launch-control implementation block from this context:\n\n{outputs.context}\n\nOriginal task:\n{task}\n\nReturn a concrete block plan with: intended slice, acceptance criteria, files likely involved, real validation commands/evidence required, non-goals, stop conditions, and what the builder must report. Keep the plan lean and executable. Do not edit files."
     },
