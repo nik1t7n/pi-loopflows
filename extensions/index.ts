@@ -586,6 +586,29 @@ function handleAgentEventForTui(tuiState: TuiState | undefined, agentName: strin
     appendTuiEventLog(tuiState, agentName, `\x1b[32m[Tool Result] ${ev.toolCall.name} -> ${stringifyToolPayload(ev.result, 500)}\x1b[0m`, triggerRender);
     return;
   }
+  if (ev.type === "tool_execution_start") {
+    const name = ev.toolName || "tool";
+    appendTuiEventLog(tuiState, agentName, `\x1b[33m[Tool Start] ${name}(${stringifyToolPayload(ev.args)})\x1b[0m`, triggerRender, `Calling tool: ${name}`);
+    return;
+  }
+  if (ev.type === "tool_execution_update") {
+    const name = ev.toolName || "tool";
+    appendTuiEventLog(tuiState, agentName, `\x1b[33m[Tool Update] ${name}: ${stringifyToolPayload(ev.update ?? ev.result ?? ev, 500)}\x1b[0m`, triggerRender, `Running tool: ${name}`);
+    return;
+  }
+  if (ev.type === "tool_execution_end") {
+    const name = ev.toolName || "tool";
+    const isError = ev.result?.isError === true || ev.isError === true;
+    const prefix = isError ? "\x1b[31m[Tool Error]" : "\x1b[32m[Tool End]";
+    appendTuiEventLog(tuiState, agentName, `${prefix} ${name} -> ${stringifyToolPayload(ev.result, 700)}\x1b[0m`, triggerRender);
+    return;
+  }
+  if (ev.type === "tool_result_end") {
+    const msg = ev.message;
+    const content = Array.isArray(msg?.content) ? msg.content.map((c: any) => c?.text || JSON.stringify(c)).join("\n") : msg?.content;
+    appendTuiEventLog(tuiState, agentName, `\x1b[32m[Tool Result] ${stringifyToolPayload(content, 700)}\x1b[0m`, triggerRender);
+    return;
+  }
 
   const msg = ev.message;
   if (!msg) return;
@@ -722,35 +745,45 @@ class PiSubprocessAdapter implements ExecutorAdapter {
     const invocation = getPiInvocation(args);
     let stdout = "";
     let stderr = "";
+    const retainedStdoutLimit = 250_000;
+    const appendRetainedStdout = (line: string) => {
+      if (stdout.length >= retainedStdoutLimit) return;
+      const remaining = retainedStdoutLimit - stdout.length;
+      stdout += `${line}\n`.slice(0, remaining);
+    };
     
     const exitCode = await new Promise<number>((resolve) => {
       const proc = spawn(invocation.command, invocation.args, { cwd: options.cwd, stdio: ["ignore", "pipe", "pipe"] });
       
       let buffer = "";
+      const processLine = (rawLine: string) => {
+        const line = rawLine.trim();
+        if (!line) return;
+        try {
+          const ev = JSON.parse(line);
+          options.onAgentEvent?.(ev);
+          // message_update can be extremely large/noisy (streaming deltas). Keep it live-only.
+          if (ev.type !== "message_update") appendRetainedStdout(line);
+        } catch {
+          appendRetainedStdout(line);
+        }
+      };
       proc.stdout.on("data", (d) => {
-        const chunk = d.toString();
-        stdout += chunk;
-        buffer += chunk;
+        buffer += d.toString();
         
         let idx;
         while ((idx = buffer.indexOf("\n")) >= 0) {
-          const line = buffer.slice(0, idx).trim();
+          const line = buffer.slice(0, idx);
           buffer = buffer.slice(idx + 1);
-          
-          if (!line) continue;
-          try {
-            const ev = JSON.parse(line);
-            if (options.onAgentEvent) {
-              options.onAgentEvent(ev);
-            }
-          } catch {
-            // Incomplete line, keep buffering
-          }
+          processLine(line);
         }
       });
       
       proc.stderr.on("data", (d) => { stderr += d.toString(); });
-      proc.on("close", (code) => resolve(code ?? 0));
+      proc.on("close", (code) => {
+        if (buffer.trim()) processLine(buffer);
+        resolve(code ?? 0);
+      });
       proc.on("error", (err) => { stderr += String(err?.message ?? err); resolve(1); });
       if (options.signal) {
         const kill = () => { proc.kill("SIGTERM"); setTimeout(() => proc.kill("SIGKILL"), 3000); };
