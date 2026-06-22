@@ -688,7 +688,7 @@ async function queryAgentMemory(task: string, cwd: string): Promise<string> {
   const agentmemoryUrl = process.env.AGENTMEMORY_URL || "http://127.0.0.1:3111";
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 800);
+    const timeoutId = setTimeout(() => controller.abort(), 2000);
     const response = await fetch(`${agentmemoryUrl}/agentmemory/search`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -696,9 +696,14 @@ async function queryAgentMemory(task: string, cwd: string): Promise<string> {
       signal: controller.signal
     });
     clearTimeout(timeoutId);
-    if (!response.ok) return "";
+    if (!response.ok) {
+      throw new Error(`agentmemory daemon returned status ${response.status}: ${response.statusText}`);
+    }
     const data = await response.json() as any;
-    if (!Array.isArray(data?.results) || data.results.length === 0) return "";
+    if (!data || !Array.isArray(data.results)) {
+      throw new Error("agentmemory search returned invalid response format");
+    }
+    if (data.results.length === 0) return "";
     return [
       "<relevant_project_memory>",
       ...data.results.slice(0, 5).map((r: any) => {
@@ -709,8 +714,8 @@ async function queryAgentMemory(task: string, cwd: string): Promise<string> {
       }),
       "</relevant_project_memory>\n\n"
     ].join("\n");
-  } catch {
-    return "";
+  } catch (err: any) {
+    throw new Error(`Failed to query agentmemory: ${err?.message || err}. Ensure that the agentmemory daemon is running on ${agentmemoryUrl}. Start it in your terminal by running 'agentmemory'.`);
   }
 }
 
@@ -913,16 +918,10 @@ Your response must strictly follow this format:
         ctx.params.lastObservedIndex = ctx.sequence.length;
         await saveArtifact(ctx, `om-observations-${currentIteration}.md`, `### Updated Observations\n${ctx.params.observations}\n\n### Current Task\n${ctx.params.currentTask}\n\n### Suggested Next Action\n${ctx.params.suggestedNextAction}`);
       } else {
-        debugLines.push(`Observer failed. Stderr: ${observerRun.stderr}`);
-        const fallbackObs = `\n- [Iteration ${currentIteration - 1}] Fallback: Steps completed without Observer compression.`;
-        ctx.params.observations = (ctx.params.observations ?? "") + fallbackObs;
-        ctx.params.lastObservedIndex = ctx.sequence.length;
+        throw new Error(`Observer agent '${observerAgent}' failed with exit code ${observerRun.exitCode}. Stderr: ${observerRun.stderr}`);
       }
     } catch (err: any) {
-      debugLines.push(`Observer exception: ${err?.message || err}`);
-      const fallbackObs = `\n- [Iteration ${currentIteration - 1}] Fallback: Steps completed without Observer compression.`;
-      ctx.params.observations = (ctx.params.observations ?? "") + fallbackObs;
-      ctx.params.lastObservedIndex = ctx.sequence.length;
+      throw new Error(`Observational Memory Observer failed: ${err?.message || err}`);
     }
 
     // Check Reflector threshold
@@ -991,10 +990,10 @@ Compress and reflect on these observations strictly matching the specified forma
 
           await saveArtifact(ctx, `om-reflections-${currentIteration}.md`, ctx.params.reflections);
         } else {
-          debugLines.push(`Reflector failed. Stderr: ${reflectorRun.stderr}`);
+          throw new Error(`Reflector agent '${reflectorAgentName}' failed with exit code ${reflectorRun.exitCode}. Stderr: ${reflectorRun.stderr}`);
         }
       } catch (err: any) {
-        debugLines.push(`Reflector exception: ${err?.message || err}`);
+        throw new Error(`Observational Memory Reflector failed: ${err?.message || err}`);
       }
     }
   }
