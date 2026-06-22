@@ -1106,7 +1106,8 @@ async function runStep(def: StepDef, ctx: RunContext, adapter: ExecutorAdapter, 
   ctx.params.agentMessages = messageBag;
   const pendingMessages = messageBag[def.agent] ?? [];
   if (pendingMessages.length > 0) {
-    task += `\n\n=== REQUIRED LIVE USER INSTRUCTIONS FOR AGENT '${def.agent}' ===\n${pendingMessages.map((m, i) => `${i + 1}. [${m.ts}] (${m.source}) ${m.message}`).join("\n")}\n\nYou MUST explicitly handle these live instructions in this step. If any instruction conflicts with safety, validation, or the workflow contract, do not ignore it; report the conflict explicitly in your final response.`;
+    const liveInstructionBlock = `=== REQUIRED LIVE USER INSTRUCTIONS FOR AGENT '${def.agent}' ===\n${pendingMessages.map((m, i) => `${i + 1}. [${m.ts}] (${m.source}) ${m.message}`).join("\n")}\n\nYou MUST explicitly handle these live instructions in this step. If any instruction conflicts with safety, validation, or the workflow contract, do not ignore it; report the conflict explicitly in your final response.\n\n=== ORIGINAL STEP TASK ===\n`;
+    task = liveInstructionBlock + task;
     messageBag[def.agent] = [];
   }
 
