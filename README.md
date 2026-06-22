@@ -2,9 +2,7 @@
 
 Build deterministic AI workflows out of Pi subagents.
 
-A **loopflow** is a reusable process for agent work: steps, gates, feedback loops, stop rules, and evidence artifacts. Instead of asking one agent to “do the whole thing”, you describe how specialist agents should cooperate: one agent gathers context, another plans, another builds, another reviews, and a gate decides whether the work moves forward, loops back for fixes, or stops.
-
-`pi-loopflows` ships with a production-ready **Launch Control** loopflow out of the box, and it is also a flexible constructor for your own workflows.
+Think of **loopflows** as LEGO for subagents. You take small specialist agents, connect them into a process, add gates where decisions matter, and let the workflow move forward, branch, loop back, or stop based on explicit results. Instead of one giant prompt, you get a reusable structure for how agents collaborate: steps, feedback loops, stop rules, and saved evidence.
 
 ## Why loopflows
 
@@ -64,32 +62,6 @@ loopflow_run({
 - `launch-control` — plan-as-contract implementation loop with builder/reviewer feedback and final audit.
 - `build-review` — small generic build → review → fix loop for scoped implementation tasks.
 - `plan-review` — planning loop that lets a reviewer reject vague or unsafe plans before implementation.
-
-## Built-in: Launch Control
-
-Launch Control is bundled because it is the clearest example of why loopflows exist. It turns a plan into a controlled implementation process:
-
-```text
-context-builder
-  → planner
-  → loop max 3:
-      worker
-      reviewer gate
-        approved -> continue
-        changes_requested -> repeat
-        blocked -> stop
-  → final audit
-```
-
-Use it when drift, skipped validation, PR correctness, or multi-step delivery risk matter.
-
-Example:
-
-```text
-/loopflow launch-control -- Implement the auth migration plan in docs/auth-plan.md
-```
-
-Launch Control is not hard-coded. It is just a `.loopflow.json` file. You can copy it, change the agents, change the prompts, adjust max iterations, add stricter gates, or create a project-specific version in `.pi/loopflows/`.
 
 ## Loopflows as a constructor
 

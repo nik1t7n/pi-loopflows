@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2 - 2026-06-22
+
+- Tighten README positioning around loopflows as LEGO-like subagent workflows.
+- Remove the dedicated Launch Control README section while keeping it listed as a bundled workflow.
+
 ## 0.1.1 - 2026-06-22
 
 - Polish product README and usage guidance for public release.
