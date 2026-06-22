@@ -291,8 +291,9 @@ class LoopflowOverlay implements Component {
         const mapLines: string[] = [];
         mapLines.push("\x1b[1m=== Select Agent to View Thoughts ===\x1b[0m");
         
-        // Find unique agents that have run
-        const uniqueAgents = ["global", ...new Set(this.state.sequence.map(s => s.agent).filter(Boolean))];
+        // Find unique agents that have run or are currently running
+        const activeAgentList = this.state.activeAgent ? [this.state.activeAgent] : [];
+        const uniqueAgents = ["global", ...new Set(this.state.sequence.map(s => s.agent).concat(activeAgentList).filter(Boolean))];
         
         uniqueAgents.forEach((agent, idx) => {
           const isSelected = idx === this.selectedAgentIndex;
