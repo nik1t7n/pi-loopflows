@@ -557,6 +557,14 @@ function renderTemplate(template: string, ctx: RunContext, iteration?: number): 
   });
 }
 
+function truncateForError(text: string | undefined, max = 6000): string {
+  const value = text ?? "";
+  if (value.length <= max) return value;
+  const head = Math.floor(max * 0.65);
+  const tail = max - head;
+  return `${value.slice(0, head)}\n\n...[truncated ${value.length - max} chars]...\n\n${value.slice(-tail)}`;
+}
+
 function extractJson(text: string): any | undefined {
   const trimmed = text.trim();
   try { return JSON.parse(trimmed); } catch {}
@@ -1147,8 +1155,8 @@ async function runLoop(loop: LoopDef, ctx: RunContext, adapter: ExecutorAdapter,
       throw new Error(`Gate step '${loop.gateStep}' failed: could not parse a valid status from agent output.
 Ensure your LLM API credentials are valid and the provider is online.
 Raw Output:
-${lastGate?.output}
-${lastGate?.stderr ? `\nStderr:\n${lastGate.stderr}` : ""}`);
+${truncateForError(lastGate?.output)}
+${lastGate?.stderr ? `\nStderr:\n${truncateForError(lastGate.stderr)}` : ""}`);
     }
     if (statusIn(status, loop.passStatuses, ["approved", "complete"])) return lastGate!;
     if (statusIn(status, loop.stopStatuses, ["blocked"])) return lastGate!;
@@ -1287,7 +1295,7 @@ async function runWorkflow(workflow: WorkflowDef, task: string, opts: { cwd: str
         if (opts.extensionCtx) {
           opts.extensionCtx.ui.notify(`Step '${node.id}' failed with exit code ${result.exitCode}`, "error");
         }
-        throw new Error(`Step '${node.id}' failed with exit code ${result.exitCode}. Stderr: ${result.stderr}`);
+        throw new Error(`Step '${node.id}' failed with exit code ${result.exitCode}. Stderr: ${truncateForError(result.stderr)}`);
       }
       
       if (node.gate) {
@@ -1295,8 +1303,8 @@ async function runWorkflow(workflow: WorkflowDef, task: string, opts: { cwd: str
           throw new Error(`Gate step '${node.id}' failed: could not parse a valid status from agent output.
 Ensure your LLM API credentials are valid and the provider is online.
 Raw Output:
-${result.output}
-${result.stderr ? `\nStderr:\n${result.stderr}` : ""}`);
+${truncateForError(result.output)}
+${result.stderr ? `\nStderr:\n${truncateForError(result.stderr)}` : ""}`);
         }
         if (statusIn(result.status, node.gate.stopStatuses, ["blocked", "incomplete"])) break;
       }
