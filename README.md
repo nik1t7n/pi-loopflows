@@ -63,6 +63,28 @@ loopflow_run({
 - `build-review` — small generic build → review → fix loop for scoped implementation tasks.
 - `plan-review` — planning loop that lets a reviewer reject vague or unsafe plans before implementation.
 
+## Advanced Features (v0.2.0)
+
+### Real-time TUI Monitoring & Streaming Panel
+v0.2.0 introduces a rich full-screen TUI monitor dashboard to make loopflow execution fully transparent.
+* **Open the Panel**: Use `/loopflow-monitor` command or press `ctrl+shift+l` to toggle the full-screen visualization overlay.
+* **Tab Navigation**: Toggle between `[1] GENERAL MAP` (workflow graph and sequence history) and `[2] AGENT THOUGHTS` (real-time stream of what agents are thinking, executing, or what tools are being invoked) using the Left/Right arrow keys or number keys `1` and `2`.
+* **Deep Inspect**: Native arrow key navigation inside the dashboard lets you select and scroll through specific agent logs and full outputs without truncation.
+
+### Interactive Control Plane & Agent Steering
+You are no longer a passive observer of the loop. The TUI panel adds real-time interaction capabilities:
+* **Run Controls**: Press `p` to pause, `r` to resume, or `x` to terminate active loopflow execution at any safe step boundary.
+* **Live Steering Input Bar**: Focus the input bar by pressing `m` or `i` to send messages directly to the active worker.
+* **Delivery Modes**: Toggle message delivery modes with `]` before sending:
+  * `queue` — messages are queued and injected as instructions into the agent's next step;
+  * `steer` — injects instruction during active turn;
+  * `interrupt` — instantly interrupts the current agent step, rewrites the task, and restarts the step with your new guidance.
+
+### Two-Layer Memory System (Mastra OM + Persistent Sessions)
+To prevent agents from having amnesia between runs or bloating their context windows during long loops, v0.2.0 features a custom two-layer memory engine:
+* **Private Persistent Sessions**: Subagents run with unique session IDs mapped to the workflow: `loopflow-{workflowName}-{agentName}`. This ensures each agent maintains an isolated, persistent memory "head" across workflow executions.
+* **Mastra-style Observational Memory**: When loops run, the orchestrator triggers an automatic `observeNow` compaction on session shutdown. High-value discoveries, decisions, and outcomes are compressed into lightweight Markdown observations, which are automatically passed into the next iteration's prompt template via `{loop.observations}` and `{loop.reflections}` to drive coherent progress.
+
 ## Loopflows as a constructor
 
 Think of loopflows as LEGO for agent processes. A loopflow can use any available Pi subagent role:
