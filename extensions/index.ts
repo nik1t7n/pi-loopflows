@@ -1888,6 +1888,60 @@ async function resumePausedRun(extensionCtx?: any, pi?: ExtensionAPI) {
   return true;
 }
 
+let checkedForUpdate = false;
+let updateNotification: string | undefined = undefined;
+
+function isNewerVersion(local: string, latest: string): boolean {
+  const localParts = local.split(".").map((x) => parseInt(x, 10) || 0);
+  const latestParts = latest.split(".").map((x) => parseInt(x, 10) || 0);
+  for (let i = 0; i < 3; i++) {
+    const localPart = localParts[i] ?? 0;
+    const latestPart = latestParts[i] ?? 0;
+    if (latestPart > localPart) return true;
+    if (latestPart < localPart) return false;
+  }
+  return false;
+}
+
+async function checkForUpdates(pi: any, ctx: any) {
+  try {
+    const pkgPath = path.join(PACKAGE_ROOT, "package.json");
+    if (!fs.existsSync(pkgPath)) return;
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+    const localVersion = pkg.version;
+    if (!localVersion) return;
+
+    if (typeof fetch === "undefined") return;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+    try {
+      const res = await fetch("https://registry.npmjs.org/pi-loopflows/latest", {
+        signal: controller.signal,
+        headers: {
+          "User-Agent": `pi-loopflows-update-checker/${localVersion}`
+        }
+      });
+      clearTimeout(timeoutId);
+
+      if (!res.ok) return;
+      const data = (await res.json()) as { version?: string };
+      const latestVersion = data.version;
+      if (!latestVersion) return;
+
+      if (isNewerVersion(localVersion, latestVersion)) {
+        updateNotification = `A new version of pi-loopflows is available: v${latestVersion} (installed: v${localVersion}). Please update using npm to get the latest features!`;
+        ctx?.ui?.notify?.(updateNotification, "warning");
+      }
+    } catch {
+      clearTimeout(timeoutId);
+    }
+  } catch {
+    // Fail silently
+  }
+}
+
 const RunParams = Type.Object({
   workflow: Type.String({ description: "Loopflow name, e.g. launch-control" }),
   task: Type.String({ description: "Task/spec/plan for the loopflow" }),
@@ -1896,6 +1950,15 @@ const RunParams = Type.Object({
 });
 
 export default function (pi: ExtensionAPI) {
+  pi.on("session_start", (_event, ctx) => {
+    if (!checkedForUpdate) {
+      checkedForUpdate = true;
+      checkForUpdates(pi, ctx).catch(() => {});
+    } else if (updateNotification) {
+      ctx?.ui?.notify?.(updateNotification, "warning");
+    }
+  });
+
   pi.on("agent_start", (event, ctx) => {
     try {
       ctx.ui.setWidget("loopflow-status", undefined);
